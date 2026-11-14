@@ -455,6 +455,9 @@ public class SpeechToTextWindow : Window
             OnlineNumber(vm, nameof(vm.GptTranscribeConcurrency), 1, 4, "F0")));
         advanced.Children.Add(OnlineRow(Se.Language.General.OpenAiCompatibleSttExtraHeaders,
             OnlineText(vm, nameof(vm.GptTranscribeExtraHeaders))));
+        var align = OnlineSwitch(vm, nameof(vm.GptTranscribeUseLocalAlignment), Se.Language.Video.AudioToText.GptUseLocalAlignment);
+        align.WithBindVisible(vm, nameof(vm.GptPromptAvailable));
+        advanced.Children.Add(align);
         var fields = new StackPanel { Spacing = 10 };
         foreach (var control in new Control[]
         {

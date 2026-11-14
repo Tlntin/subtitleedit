@@ -81,6 +81,7 @@ public sealed class CrispAsrAlignOnlyRunner : ForcedAligner.IRunner
         catch (OperationCanceledException)
         {
             TryKill(process);
+            await process.WaitForExitAsync(CancellationToken.None).ConfigureAwait(false);
             throw;
         }
 

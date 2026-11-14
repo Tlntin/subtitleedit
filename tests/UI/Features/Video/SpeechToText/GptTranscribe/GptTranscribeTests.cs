@@ -92,7 +92,7 @@ public class GptTranscribeTests : IDisposable
             return Json("""{"text":"Hello","segments":[{"id":"seg_001","speaker":"A","start":2.5,"end":4.2,"text":"Hello"}]}""");
         });
         using var http = new HttpClient(handler);
-        var service = new GptTranscribeService(settings, 2, http, audio);
+        var service = Service(settings, 2, http, audio);
         var result = await service.TranscribeAsync(AudioFile(), cancellationToken: TestContext.Current.CancellationToken);
         var segment = Assert.Single(result.Segments!);
         Assert.Equal(2.5, segment.Start);
@@ -101,9 +101,9 @@ public class GptTranscribeTests : IDisposable
     }
 
     [Fact]
-    public async Task VadClips_KeepAbsoluteOffsetsAndSilenceGaps_WhenResponsesFinishOutOfOrder()
+    public async Task ContextChunks_CoverCompleteTimeline_WhenResponsesFinishOutOfOrder()
     {
-        var audio = new FakeAudio([new(2, 3.5), new(7.2, 8.8)]);
+        var audio = new FakeAudio([new(2, 3.5), new(7.2, 8.8)], duration: 60);
         using var handler = new Handler(async (request, token) =>
         {
             var file = Assert.IsType<MultipartFormDataContent>(request.Content).Single(p => p.Headers.ContentDisposition!.Name!.Trim('"') == "file");
@@ -117,15 +117,16 @@ public class GptTranscribeTests : IDisposable
         });
         using var http = new HttpClient(handler);
         var seen = new List<OpenAiCompatibleSegment>();
-        var result = await new GptTranscribeService(Settings(), 2, http, audio).TranscribeAsync(AudioFile(),
+        var result = await Service(Settings(), 2, http, audio).TranscribeAsync(AudioFile(),
             segmentProgress: new InlineProgress<OpenAiCompatibleSegment>(seen.Add), cancellationToken: TestContext.Current.CancellationToken);
-        Assert.Equal(2, result.Segments!.Count);
-        Assert.Equal(2, seen.Count);
-        Assert.Equal(2, seen[0].Start);
-        Assert.Equal(3.5, seen[0].End);
+        Assert.Equal(3, result.Segments!.Count);
+        Assert.Equal(3, seen.Count);
+        Assert.Equal(0, seen[0].Start);
+        Assert.Equal(24, seen[0].End);
         Assert.Equal("First sentence. Another sentence.", seen[0].Text); // no proportional sentence timestamps
-        Assert.Equal(7.2, seen[1].Start);
-        Assert.Equal(8.8, seen[1].End);
+        Assert.Equal(24, seen[1].Start);
+        Assert.Equal(48, seen[1].End);
+        Assert.Equal(60, seen[2].End);
         Assert.False(Directory.Exists(Path.GetDirectoryName(audio.PcmPath)!));
     }
 
@@ -135,7 +136,7 @@ public class GptTranscribeTests : IDisposable
         var audio = new FakeAudio([], useRealVad: true);
         using var handler = new Handler((_, _) => throw new InvalidOperationException("Silent audio must not be uploaded"));
         using var http = new HttpClient(handler);
-        var result = await new GptTranscribeService(Settings(), 2, http, audio).TranscribeAsync(AudioFile(),
+        var result = await Service(Settings(), 2, http, audio).TranscribeAsync(AudioFile(),
             cancellationToken: TestContext.Current.CancellationToken);
         Assert.Empty(result.Segments!);
         Assert.Equal(string.Empty, result.Text);
@@ -154,10 +155,10 @@ public class GptTranscribeTests : IDisposable
             return Task.FromResult(response);
         });
         using var http = new HttpClient(handler);
-        var result = await new GptTranscribeService(Settings(), 1, http, new FakeAudio([new(1, 2)])).TranscribeAsync(AudioFile(),
+        var result = await Service(Settings(), 1, http, new FakeAudio([new(1, 2)])).TranscribeAsync(AudioFile(),
             cancellationToken: TestContext.Current.CancellationToken);
         Assert.Equal(2, handler.Calls);
-        Assert.Equal(1, Assert.Single(result.Segments!).Start);
+        Assert.Equal(0, Assert.Single(result.Segments!).Start);
     }
 
     [Fact]
@@ -169,7 +170,7 @@ public class GptTranscribeTests : IDisposable
             Content = new StringContent("unauthorized"),
         }));
         using var http = new HttpClient(handler);
-        await Assert.ThrowsAsync<HttpRequestException>(() => new GptTranscribeService(Settings(), 1, http, audio)
+        await Assert.ThrowsAsync<HttpRequestException>(() => Service(Settings(), 1, http, audio)
             .TranscribeAsync(AudioFile(), cancellationToken: TestContext.Current.CancellationToken));
         Assert.Equal(1, handler.Calls);
         Assert.False(Directory.Exists(Path.GetDirectoryName(audio.PcmPath)!));
@@ -188,7 +189,7 @@ public class GptTranscribeTests : IDisposable
             return Json("{}");
         });
         using var http = new HttpClient(handler);
-        var task = new GptTranscribeService(Settings(), 1, http, audio).TranscribeAsync(AudioFile(), cancellationToken: cts.Token);
+        var task = Service(Settings(), 1, http, audio).TranscribeAsync(AudioFile(), cancellationToken: cts.Token);
         await entered.Task.WaitAsync(TestContext.Current.CancellationToken);
         cts.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => task);
@@ -202,6 +203,86 @@ public class GptTranscribeTests : IDisposable
     public void DiarizeWithoutValidTimes_FailsInsteadOfInventingSubtitleTimes(string json) =>
         Assert.Throws<InvalidDataException>(() => GptTranscribeResponseParser.Parse(json, true));
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SpeechNotDetectedOrVadFailed_StillUploadsAudibleAudio(bool vadFailed)
+    {
+        using var handler = new Handler((_, _) => Task.FromResult(Json("""{"text":"Quiet speech retained"}""")));
+        using var http = new HttpClient(handler);
+        var result = await Service(Settings(), 2, http, new FakeAudio([], failVad: vadFailed))
+            .TranscribeAsync(AudioFile(), cancellationToken: TestContext.Current.CancellationToken);
+        Assert.Equal(1, handler.Calls);
+        Assert.Equal("Quiet speech retained", Assert.Single(result.Segments!).Text);
+        Assert.Equal(0, result.Segments![0].Start);
+        Assert.Equal(10, result.Segments[0].End);
+    }
+
+    [Fact]
+    public async Task LocalAlignment_ProvidesMeasuredSentenceTimesWithinTheLargerContextClip()
+    {
+        using var handler = new Handler((_, _) => Task.FromResult(Json("""{"text":"First. Second."}""")));
+        using var http = new HttpClient(handler);
+        var aligner = new FakeAligner(false);
+        var result = await new GptTranscribeService(Settings(), 1, http, new FakeAudio([]), aligner)
+            .TranscribeAsync(AudioFile(), cancellationToken: TestContext.Current.CancellationToken);
+        Assert.Equal("First. Second.", aligner.Text);
+        Assert.Equal(2, result.Segments!.Count);
+        Assert.Equal(2.1, result.Segments[0].Start);
+        Assert.Equal(7.8, result.Segments[1].End);
+        Assert.False(result.HasChunkLevelTimings);
+    }
+
+    [Fact]
+    public async Task AlignmentFailure_PreservesAllRecognizedText()
+    {
+        using var handler = new Handler((_, _) => Task.FromResult(Json("""{"text":"First. Second."}""")));
+        using var http = new HttpClient(handler);
+        var result = await new GptTranscribeService(Settings(), 1, http, new FakeAudio([]), new FakeAligner(true))
+            .TranscribeAsync(AudioFile(), cancellationToken: TestContext.Current.CancellationToken);
+        Assert.Equal("First. Second.", Assert.Single(result.Segments!).Text);
+        Assert.Equal(10, result.Segments![0].End);
+        Assert.True(result.HasChunkLevelTimings);
+    }
+
+    [Fact]
+    public async Task Cancel_StopsAllConcurrentRequestsBeforeAnyMoreChunksStart()
+    {
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        var count = 0;
+        var bothEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var handler = new Handler(async (_, token) =>
+        {
+            if (Interlocked.Increment(ref count) == 2) bothEntered.SetResult();
+            await Task.Delay(Timeout.Infinite, token);
+            return Json("{}");
+        });
+        using var http = new HttpClient(handler);
+        var audio = new FakeAudio([], duration: 120);
+        var task = Service(Settings(), 2, http, audio).TranscribeAsync(AudioFile(), cancellationToken: cts.Token);
+        await bothEntered.Task.WaitAsync(TestContext.Current.CancellationToken);
+        cts.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => task);
+        Assert.Equal(2, handler.Calls);
+        Assert.False(Directory.Exists(Path.GetDirectoryName(audio.PcmPath)!));
+    }
+
+    private sealed class FakeAligner(bool fail) : IGptSubtitleAligner
+    {
+        internal string? Text;
+        public Task<IReadOnlyList<OpenAiCompatibleSegment>> AlignAsync(string clip, string text, double duration, CancellationToken token)
+        {
+            Text = text;
+            if (fail) throw new InvalidDataException("test alignment failure");
+            return Task.FromResult<IReadOnlyList<OpenAiCompatibleSegment>>([
+                new() { Text = "First.", Start = 2.1, End = 3.4 },
+                new() { Text = "Second.", Start = 6.2, End = 7.8 }]);
+        }
+    }
+
+    private static GptTranscribeService Service(OpenAiCompatibleSettings settings, int concurrency,
+        HttpClient http, IGptAudioProcessor audio) => new(settings, concurrency, http, audio, useLocalAlignment: false);
+
     private sealed class Handler(Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> send) : HttpMessageHandler
     {
         public int Calls;
@@ -212,17 +293,20 @@ public class GptTranscribeTests : IDisposable
         }
     }
 
-    private sealed class FakeAudio(IReadOnlyList<SpeechInterval> intervals, bool useRealVad = false) : IGptAudioProcessor
+    private sealed class FakeAudio(IReadOnlyList<SpeechInterval> intervals, bool useRealVad = false, int duration = 10, bool failVad = false) : IGptAudioProcessor
     {
         public string? PcmPath;
         public Task DecodeAsync(string audioFile, string pcmFile, CancellationToken token)
         {
             PcmPath = pcmFile;
-            File.WriteAllBytes(pcmFile, new byte[32000 * 10]);
+            var bytes = new byte[32000 * duration];
+            if (!useRealVad) Array.Fill(bytes, (byte)1);
+            File.WriteAllBytes(pcmFile, bytes);
             return Task.CompletedTask;
         }
-        public IReadOnlyList<SpeechInterval> Detect(string pcmFile, CancellationToken token) =>
-            useRealVad ? SileroVadSpeechDetector.Detect(pcmFile, token) : intervals;
+        public IReadOnlyList<SpeechInterval> Detect(string pcmFile, CancellationToken token) => failVad
+            ? throw new InvalidOperationException("test VAD failure")
+            : useRealVad ? SileroVadSpeechDetector.Detect(pcmFile, token) : intervals;
     }
 
     private sealed class InlineProgress<T>(Action<T> report) : IProgress<T>

@@ -125,6 +125,7 @@ public partial class SpeechToTextViewModel : ObservableObject
     [ObservableProperty] private string _gptTranscribeExtraHeaders = string.Empty;
     [ObservableProperty] private int _gptTranscribeTimeoutSeconds;
     [ObservableProperty] private int _gptTranscribeConcurrency;
+    [ObservableProperty] private bool _gptTranscribeUseLocalAlignment;
     public ObservableCollection<GptTranscribeModel> GptModels { get; } = new(GptTranscribeModels.All);
     public bool GptPromptAvailable => SelectedGptTranscribeModel?.HasNativeTimestamps != true;
     public string GptTimingHint => SelectedGptTranscribeModel?.HasNativeTimestamps == true
@@ -214,7 +215,8 @@ public partial class SpeechToTextViewModel : ObservableObject
     private double _showProgressPct = -1;
     private readonly VideoInfo _videoInfo = new();
     private bool _abort;
-    private CancellationTokenSource? _openAiCts;
+    private readonly SpeechToTextOnlineCancellation _onlineCancellation = new();
+    private bool _gptChunkLevelTimings;
     private CancellationTokenSource? _addFilesCts;
     private bool _addFilesCancelled;
 
@@ -449,6 +451,7 @@ public partial class SpeechToTextViewModel : ObservableObject
         GptTranscribeExtraHeaders = migrateGpt ? tools.OpenAiCompatibleSttExtraHeaders : tools.GptTranscribeExtraHeaders;
         GptTranscribeTimeoutSeconds = migrateGpt ? tools.OpenAiCompatibleSttTimeoutSeconds : tools.GptTranscribeTimeoutSeconds;
         GptTranscribeConcurrency = tools.GptTranscribeConcurrency;
+        GptTranscribeUseLocalAlignment = tools.GptTranscribeUseLocalAlignment;
 
         OpenRouterSttApiKey = Se.Settings.Providers.OpenRouterApiKey;
         OpenRouterSttModel = Se.Settings.Tools.OpenRouterSttModel;
@@ -557,6 +560,7 @@ public partial class SpeechToTextViewModel : ObservableObject
         Se.Settings.Tools.GptTranscribeExtraHeaders = GptTranscribeExtraHeaders;
         Se.Settings.Tools.GptTranscribeTimeoutSeconds = GptTranscribeTimeoutSeconds;
         Se.Settings.Tools.GptTranscribeConcurrency = GptTranscribeConcurrency;
+        Se.Settings.Tools.GptTranscribeUseLocalAlignment = GptTranscribeUseLocalAlignment;
 
         Se.Settings.Providers.OpenRouterApiKey = OpenRouterSttApiKey ?? string.Empty;
         Se.Settings.Tools.OpenRouterSttModel = OpenRouterSttModel ?? string.Empty;
@@ -1620,6 +1624,7 @@ public partial class SpeechToTextViewModel : ObservableObject
         SaveSettings();
 
         _onlineDetectedLanguage = null;
+        _gptChunkLevelTimings = false;
 
         var transcriber = engine.CreateTranscriber(out var configError);
         if (transcriber == null)
@@ -1679,38 +1684,41 @@ public partial class SpeechToTextViewModel : ObservableObject
 
         var subtitle = new Subtitle();
         var segmentCount = 0;
-        IProgress<string>? requestProgress = engine is GptTranscribeEngine ? new Progress<string>(message =>
+        IProgress<string>? requestProgress = engine is GptTranscribeEngine ? new SpeechToTextSynchronousProgress<string>(message => Dispatcher.UIThread.Post(() =>
         {
+            if (_abort || _windowClosing) return;
             ProgressText = IsBatchMode ? GetProgressText() + " " + message : message;
             LogToConsole(message + Environment.NewLine);
-        }) : null;
+        })) : null;
 
         try
         {
             var service = transcriber;
 
-            var segmentProgress = new Progress<OpenAiCompatibleSegment>(seg =>
+            var segmentProgress = new SpeechToTextSynchronousProgress<OpenAiCompatibleSegment>(seg =>
             {
-                Interlocked.Increment(ref segmentCount);
-                LogToConsole($"  Segment #{segmentCount}: {TimeSpan.FromSeconds(seg.Start):mm\\:ss\\.fff} -> {TimeSpan.FromSeconds(seg.End):mm\\:ss\\.fff}: {seg.Text.Trim()}");
-                if (_startTicks > 0)
-                {
-                    var durationMs = (DateTime.UtcNow.Ticks - _startTicks) / 10_000;
-                    UpdateElapsedAndBatchProgress();
-                }
-                if (_videoInfo.TotalSeconds > 0)
-                {
-                    _endSeconds = Math.Max(_endSeconds, seg.End);
-                    SetProgressBarPct(seg.End / _videoInfo.TotalSeconds * 100.0);
-                }
+                var number = Interlocked.Increment(ref segmentCount);
                 lock (subtitle.Paragraphs)
                 {
                     var text = seg.Text.Trim();
                     if (!string.IsNullOrEmpty(text))
-                    {
                         subtitle.Paragraphs.Add(new Paragraph(text, seg.Start * 1000.0, seg.End * 1000.0));
-                    }
                 }
+                Dispatcher.UIThread.Post(() =>
+                {
+                    LogToConsole($"  Segment #{number}: {TimeSpan.FromSeconds(seg.Start):hh\\:mm\\:ss\\.fff} -> {TimeSpan.FromSeconds(seg.End):hh\\:mm\\:ss\\.fff}: {seg.Text.Trim()}");
+                    if (_abort || _windowClosing) return;
+                    if (_startTicks > 0)
+                    {
+                        var durationMs = (DateTime.UtcNow.Ticks - _startTicks) / 10_000;
+                        UpdateElapsedAndBatchProgress();
+                    }
+                    if (_videoInfo.TotalSeconds > 0)
+                    {
+                        _endSeconds = Math.Max(_endSeconds, seg.End);
+                        SetProgressBarPct(seg.End / _videoInfo.TotalSeconds * 100.0);
+                    }
+                });
             });
 
             var audioSizeBytes = new FileInfo(audioFileName).Length;
@@ -1723,6 +1731,7 @@ public partial class SpeechToTextViewModel : ObservableObject
             else
             {
                 var response = await service.TranscribeAsync(audioFileName, language, requestProgress, segmentProgress, cancellationToken);
+                _gptChunkLevelTimings |= response.HasChunkLevelTimings;
                 RememberDetectedLanguage(response);
                 IngestTranscriptionResponse(
                     response,
@@ -1760,6 +1769,11 @@ public partial class SpeechToTextViewModel : ObservableObject
         catch (OperationCanceledException)
         {
             LogToConsole("Transcription cancelled by user");
+            if (engine is GptTranscribeEngine)
+            {
+                await StopGptTranscriptionAfterCancellationAsync(subtitle);
+                return;
+            }
             if (subtitle.Paragraphs.Count > 0)
             {
                 LogToConsole($"Returning {subtitle.Paragraphs.Count} partial segment(s)");
@@ -1864,11 +1878,6 @@ public partial class SpeechToTextViewModel : ObservableObject
                 await MessageBox.Show(Window!, Se.Language.General.TranscriptionError, $"{Se.Language.General.TranscriptionFailed}: {ex.Message}");
                 FailCurrentOnlineSttJob();
             });
-        }
-        finally
-        {
-            _openAiCts?.Dispose();
-            _openAiCts = null;
         }
     }
 
@@ -2063,7 +2072,7 @@ public partial class SpeechToTextViewModel : ObservableObject
                 // from this chunk get offset back to absolute time before the UI
                 // sees them.
                 var offsetSeconds = boundary.StartSeconds;
-                var offsettingProgress = new Progress<OpenAiCompatibleSegment>(seg =>
+                var offsettingProgress = new SpeechToTextSynchronousProgress<OpenAiCompatibleSegment>(seg =>
                 {
                     segmentProgress.Report(new OpenAiCompatibleSegment
                     {
@@ -2082,6 +2091,7 @@ public partial class SpeechToTextViewModel : ObservableObject
 
                 var chunkResponse = await service.TranscribeAsync(
                     chunkPath, language, requestProgress, offsettingProgress, cancellationToken);
+                _gptChunkLevelTimings |= chunkResponse.HasChunkLevelTimings;
 
                 RememberDetectedLanguage(chunkResponse);
                 IngestTranscriptionResponse(
@@ -2596,6 +2606,13 @@ public partial class SpeechToTextViewModel : ObservableObject
 
     private Subtitle PostProcess(Subtitle transcript)
     {
+        if (GetEffectiveSelectedEngine() is GptTranscribeEngine && _gptChunkLevelTimings)
+        {
+            // A missing/failed aligner must not silently turn coarse chunk times into
+            // apparently precise sentence times through proportional line splitting.
+            transcript.Renumber();
+            return transcript;
+        }
         var languageCode = SelectedLanguage?.Code;
         if (string.IsNullOrWhiteSpace(languageCode))
         {
@@ -3207,11 +3224,18 @@ public partial class SpeechToTextViewModel : ObservableObject
                 _timerAudioExtract.Stop();
 
 #pragma warning disable CA1416
-                _audioExtractProcess.Kill(true);
+                try { if (!_audioExtractProcess.HasExited) _audioExtractProcess.Kill(true); }
+                catch (InvalidOperationException) { }
 #pragma warning restore CA1416
 
-                ProgressOpacity = 0;
-                IsTranscribeEnabled = true;
+                Dispatcher.UIThread.Post(() =>
+                {
+                    HideProgressBar();
+                    IsTranscribeEnabled = true;
+                    EstimatedText = string.Empty;
+                    BatchEstimatedText = string.Empty;
+                    ProgressText = Se.Language.Video.AudioToText.GptCancelled;
+                });
                 return;
             }
 
@@ -4676,13 +4700,13 @@ public partial class SpeechToTextViewModel : ObservableObject
         if (!IsTranscribeEnabled)
         {
             // Always set _abort, online engines included: during the audio-extraction phase
-            // _openAiCts does not exist yet (it is created once ffmpeg has exited), so
+            // the online session does not exist yet (it is created once ffmpeg has exited), so
             // cancelling did nothing at all and the upload started anyway. _abort is also
             // what MakeResult checks to stop a whole batch rather than skip one item.
             _abort = true;
             if (GetEffectiveSelectedEngine() is IOnlineSttEngine)
             {
-                _openAiCts?.Cancel();
+                _onlineCancellation.Cancel();
             }
 
             return;
@@ -4712,8 +4736,8 @@ public partial class SpeechToTextViewModel : ObservableObject
             var languageCode = SelectedLanguage?.Code;
             _timerWhisper.Stop();
             ShowProgressBar();
-            _openAiCts = new CancellationTokenSource();
-            _ = ProcessOnlineSttTranscription(onlineEngine, waveFileName, languageCode, _openAiCts.Token);
+            var owner = _onlineCancellation.Begin();
+            _ = RunOwnedOnlineTranscriptionAsync(onlineEngine, waveFileName, languageCode, owner);
             return true;
         }
 
@@ -5466,7 +5490,7 @@ public partial class SpeechToTextViewModel : ObservableObject
         var sttAudioFormat = isOpenAiEngine
             ? (effectiveEngine is OpenAiCompatibleSttEngine
                 ? OpenAiCompatibleSttAudioFormat
-                : effectiveEngine is OpenRouterSttEngine && OpenRouterSttService.RequiresWavAudio(OpenRouterSttModel)
+                : effectiveEngine is GptTranscribeEngine || effectiveEngine is OpenRouterSttEngine && OpenRouterSttService.RequiresWavAudio(OpenRouterSttModel)
                     ? "wav"
                     // Google Cloud uploads to a Cloud Storage bucket rather than through a
                     // request body, so OpenAI's 25 MB limit (the reason the other online
@@ -5686,6 +5710,16 @@ public partial class SpeechToTextViewModel : ObservableObject
             _outputText.Enqueue(s);
         }
 
+        if (!Dispatcher.UIThread.CheckAccess())
+        {
+            Dispatcher.UIThread.Post(() => AppendConsoleLog(s));
+            return;
+        }
+        AppendConsoleLog(s);
+    }
+
+    private void AppendConsoleLog(string s)
+    {
         ConsoleLog += s.Trim() + "\n";
 
         // Tail behavior: keep the console scrolled to the latest line so the user
@@ -6541,7 +6575,7 @@ public partial class SpeechToTextViewModel : ObservableObject
         // ffmpeg process - kill them so closing the window mid-run doesn't leave
         // an orphan burning CPU in the background.
         KillRunningProcesses();
-        _openAiCts?.Cancel();
+        _onlineCancellation.Cancel();
         _sleepInhibitor.Dispose();
 
         UiUtil.SaveWindowPosition(Window);

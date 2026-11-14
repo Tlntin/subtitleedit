@@ -121,17 +121,19 @@ Select **OpenAI GPT Transcribe** in the engine list. Enter the complete `/v1/aud
 
 | Model | Subtitle timing |
 | --- | --- |
-| `gpt-transcribe` | Local Silero VAD speech intervals |
-| `gpt-4o-transcribe` | Local Silero VAD speech intervals |
-| `gpt-4o-mini-transcribe` | Local Silero VAD speech intervals |
-| `gpt-4o-mini-transcribe-2025-12-15` | Local Silero VAD speech intervals |
+| `gpt-transcribe` | Continuous context chunks + installed local forced alignment |
+| `gpt-4o-transcribe` | Continuous context chunks + installed local forced alignment |
+| `gpt-4o-mini-transcribe` | Continuous context chunks + installed local forced alignment |
+| `gpt-4o-mini-transcribe-2025-12-15` | Continuous context chunks + installed local forced alignment |
 | `gpt-4o-transcribe-diarize` | Native API segment start/end times (`diarized_json`) |
 
-For models returning text without timestamps, Subtitle Edit decodes the audio locally, detects speech with the bundled Silero VAD model, and sends only the detected clips. Each returned text becomes a subtitle at that clip's original position. Silence between clips is preserved, and silent files make no transcription requests. Long continuous speech is divided into clips of approximately 12 seconds, preferring quieter cuts. Timings describe speech intervals; they are **not word alignment** and a clip can contain several sentences. Review and adjust the result as needed.
+For models returning text without timestamps, Subtitle Edit extracts lossless 16 kHz mono audio and sends continuous context chunks, targeting 24 seconds and capped at 30 seconds. Silero VAD suggests cut points near that target; it does **not** discard audio it considers non-speech. Quiet dialogue and gaps remain in the uploaded timeline. Only exact digital silence is skipped. Each request's range and any empty API response are logged explicitly.
+
+When enabled in **More settings**, an already installed Crisp ASR executable and `qwen3-forced-aligner-0.6b-q8_0.gguf` align the API text back to each audio chunk. Sentence boundaries come from the recognized punctuation; their times come from forced alignment, rather than proportional text timing. The original recognized text is retained. The aligner is reused from the current data folder or the user's existing Subtitle Edit data folder; this option does not automatically download models. Alignment runs one chunk at a time to limit GPU memory use. If the aligner is missing, disabled or fails, the full chunk text is retained with **chunk-level times** and a visible log message. Sentence-level timing then needs an aligner or the native Diarize model.
 
 The diarize model uses its own segment timestamps and server-side chunking instead of local VAD. Missing native timestamps produce an error rather than estimated text timings. Large uploads are split locally and returned segment times are shifted back to the source timeline.
 
-**Language hint** can be left empty for detection. For `gpt-transcribe`, multiple language codes can be separated with commas, for example `zh,en`. **Prompt** provides spelling or vocabulary context and is hidden for the diarize model. **More settings** contains timeout, additional headers and concurrent clip requests (default 2, adjustable from 1 to 4). Requests are restored to timeline order even when they finish out of order. Rate limits and temporary server errors are retried, and cancellation removes this run's temporary audio.
+**Language hint** can be left empty for detection. For `gpt-transcribe`, multiple language codes can be separated with commas, for example `zh,en`. **Prompt** provides spelling or vocabulary context and is hidden for the diarize model. **More settings** contains timeout, additional headers, local sentence alignment and concurrent clip requests (default 2, adjustable from 1 to 4). Requests are restored to timeline order even when they finish out of order. Rate limits and temporary server errors are retried. Cancelling stops active requests and the native aligner, restores the controls, saves recognized partial subtitles locally under `Subtitle Edit/SpeechToTextRecovery`, and removes this run's temporary audio. Cancelling does not run the full post-processing pipeline first.
 
 These settings are separate from **OpenAI compatible STT**. On first use, an existing configuration for one of the listed GPT models is copied together with its endpoint and key. Compatible gateways must support the selected model and its request format; model availability depends on the endpoint. See the [OpenAI speech-to-text guide](https://developers.openai.com/api/docs/guides/speech-to-text).
 

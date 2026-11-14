@@ -5,6 +5,8 @@ namespace Nikse.SubtitleEdit.Features.Video.SpeechToText.OpenAiCompatible;
 
 public class OpenAiCompatibleSttResponse
 {
+    [JsonIgnore]
+    public bool HasChunkLevelTimings { get; set; }
     [JsonPropertyName("text")]
     public string Text { get; set; } = string.Empty;
 

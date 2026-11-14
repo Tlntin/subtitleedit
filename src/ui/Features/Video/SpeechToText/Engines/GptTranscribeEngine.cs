@@ -47,7 +47,7 @@ public sealed class GptTranscribeEngine : IOnlineSttEngine
             Prompt = tools.GptTranscribePrompt, TimeoutSeconds = tools.GptTranscribeTimeoutSeconds,
             ExtraHeaders = tools.GptTranscribeExtraHeaders, Stream = false, AudioFormat = "wav",
             Logger = message => Se.WriteToolsLog(message, true),
-        }, tools.GptTranscribeConcurrency);
+        }, tools.GptTranscribeConcurrency, useLocalAlignment: tools.GptTranscribeUseLocalAlignment);
     }
 
     public bool IsEngineInstalled() => true;

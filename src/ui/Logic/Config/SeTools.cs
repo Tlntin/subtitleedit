@@ -158,6 +158,7 @@ public class SeTools
     public string GptTranscribeExtraHeaders { get; set; } = string.Empty;
     public int GptTranscribeTimeoutSeconds { get; set; } = 300;
     public int GptTranscribeConcurrency { get; set; } = 2;
+    public bool GptTranscribeUseLocalAlignment { get; set; } = true;
 
     [Obsolete("Use Se.Settings.Providers.OpenRouterApiKey - kept only so old settings files can be migrated.")]
     public string OpenRouterSttApiKey { get; set; } = string.Empty;

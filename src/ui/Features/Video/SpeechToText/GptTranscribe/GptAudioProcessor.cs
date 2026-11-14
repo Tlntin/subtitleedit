@@ -64,4 +64,21 @@ internal sealed class GptAudioProcessor(string ffmpeg) : IGptAudioProcessor
             length -= count;
         }
     }
+
+    internal static bool HasSignal(string pcmFile, SpeechInterval interval, CancellationToken token)
+    {
+        using var input = File.OpenRead(pcmFile);
+        input.Position = Math.Clamp((long)(interval.Start * 16000) * 2, 0, input.Length);
+        var end = Math.Clamp((long)Math.Ceiling(interval.End * 16000) * 2, input.Position, input.Length);
+        var buffer = new byte[32768];
+        while (input.Position < end)
+        {
+            token.ThrowIfCancellationRequested();
+            var count = (int)Math.Min(buffer.Length, end - input.Position);
+            input.ReadExactly(buffer.AsSpan(0, count));
+            // Only exact digital silence is safe to skip. Quiet/low-confidence speech is uploaded.
+            if (buffer.AsSpan(0, count).IndexOfAnyExcept((byte)0) >= 0) return true;
+        }
+        return false;
+    }
 }

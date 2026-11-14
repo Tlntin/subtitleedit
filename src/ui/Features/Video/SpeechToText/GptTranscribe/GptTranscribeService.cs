@@ -1,6 +1,7 @@
 using Nikse.SubtitleEdit.Core.Common;
 using Nikse.SubtitleEdit.Features.Video.SpeechToText.Engines;
 using Nikse.SubtitleEdit.Features.Video.SpeechToText.OpenAiCompatible;
+using Nikse.SubtitleEdit.Features.Files.ImportPlainText;
 using Nikse.SubtitleEdit.Logic.Config;
 using System;
 using System.Collections.Generic;
@@ -19,14 +20,16 @@ internal sealed class GptTranscribeService : ISttTranscriber
     private readonly OpenAiCompatibleSettings _settings;
     private readonly IGptAudioProcessor _audio;
     private readonly int _concurrency;
+    private readonly IGptSubtitleAligner? _aligner;
 
     internal GptTranscribeService(OpenAiCompatibleSettings settings, int concurrency,
-        HttpClient? client = null, IGptAudioProcessor? audio = null)
+        HttpClient? client = null, IGptAudioProcessor? audio = null, IGptSubtitleAligner? aligner = null, bool useLocalAlignment = true)
     {
         _settings = settings;
         _client = new OpenAiSttService(client ?? OpenAiSttService.SharedHttpClient, settings);
         _audio = audio ?? new GptAudioProcessor(Configuration.Settings.General.FFmpegLocation);
         _concurrency = Math.Clamp(concurrency, 1, 4);
+        _aligner = useLocalAlignment ? aligner ?? GptSubtitleAligner.FindInstalled() : null;
     }
 
     public async Task<OpenAiCompatibleSttResponse> TranscribeAsync(string audioFilePath, string? language = null,
@@ -49,17 +52,27 @@ internal sealed class GptTranscribeService : ISttTranscriber
         {
             progress?.Report(Se.Language.Video.AudioToText.GptDetectingSpeech);
             await _audio.DecodeAsync(audioFilePath, pcm, cancellationToken).ConfigureAwait(false);
-            var intervals = await Task.Run(() => _audio.Detect(pcm, cancellationToken), cancellationToken).ConfigureAwait(false);
+            IReadOnlyList<SpeechInterval> speech;
+            try { speech = await Task.Run(() => _audio.Detect(pcm, cancellationToken), cancellationToken).ConfigureAwait(false); }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                speech = Array.Empty<SpeechInterval>();
+                progress?.Report(Se.Language.Video.AudioToText.GptVadBoundaryFallback);
+            }
             var result = new OpenAiCompatibleSttResponse
             {
                 Segments = new List<OpenAiCompatibleSegment>(),
                 Duration = new FileInfo(pcm).Length / 32000.0,
             };
-            if (intervals.Count == 0)
+            if (!GptAudioProcessor.HasSignal(pcm, new SpeechInterval(0, result.Duration ?? 0), cancellationToken))
             {
                 progress?.Report(Se.Language.Video.AudioToText.GptNoSpeech);
-                return result; // Silence is never uploaded to the API.
+                return result; // Only exact digital silence is skipped, never low-confidence VAD speech.
             }
+            var intervals = GptContextChunkPlanner.Plan(speech, result.Duration ?? 0);
+            progress?.Report(string.Format(Se.Language.Video.AudioToText.GptContextChunks, intervals.Count));
+            progress?.Report(_aligner != null ? Se.Language.Video.AudioToText.GptAlignmentEnabled : Se.Language.Video.AudioToText.GptAlignmentUnavailable);
+            using var alignmentGate = new SemaphoreSlim(1, 1);
 
             for (var first = 0; first < intervals.Count; first += _concurrency)
             {
@@ -70,8 +83,27 @@ internal sealed class GptTranscribeService : ISttTranscriber
                     try
                     {
                         GptAudioProcessor.WriteClip(pcm, clip, interval, cancellationToken);
-                        var response = await RequestAsync(clip, language, cancellationToken).ConfigureAwait(false);
-                        return (interval, response);
+                        var hasSignal = GptAudioProcessor.HasSignal(pcm, interval, cancellationToken);
+                        if (hasSignal) progress?.Report(string.Format(Se.Language.Video.AudioToText.GptTranscribingChunk,
+                            first + i + 1, intervals.Count, interval.Start, interval.End));
+                        var response = hasSignal ? await RequestAsync(clip, language, cancellationToken).ConfigureAwait(false)
+                            : new OpenAiCompatibleSttResponse();
+                        IReadOnlyList<OpenAiCompatibleSegment>? aligned = null;
+                        if (!string.IsNullOrWhiteSpace(response.Text) && _aligner != null)
+                        {
+                            await alignmentGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+                            try
+                            {
+                                progress?.Report(string.Format(Se.Language.Video.AudioToText.GptAligningChunk, first + i + 1, intervals.Count));
+                                aligned = await _aligner.AlignAsync(clip, response.Text, interval.End - interval.Start, cancellationToken).ConfigureAwait(false);
+                            }
+                            catch (Exception ex) when (ex is ForcedAlignerException or InvalidDataException or IOException)
+                            {
+                                progress?.Report(string.Format(Se.Language.Video.AudioToText.GptAlignmentFailed, first + i + 1));
+                            }
+                            finally { alignmentGate.Release(); }
+                        }
+                        return (interval, response, aligned, hasSignal);
                     }
                     finally { if (File.Exists(clip)) File.Delete(clip); }
                 }).ToArray();
@@ -79,17 +111,27 @@ internal sealed class GptTranscribeService : ISttTranscriber
                 // Emit in timeline order even when a later request finishes first. The main
                 // editor uses segment end times for live progress and batch ETA.
                 var responses = await Task.WhenAll(batch).ConfigureAwait(false);
-                foreach (var (interval, response) in responses)
+                foreach (var (interval, response, aligned, hasSignal) in responses)
                 {
                     if (!string.IsNullOrWhiteSpace(response.Language)) result.Language ??= response.Language;
                     var text = response.Text.Trim();
-                    if (text.Length == 0) continue;
-                    var segment = new OpenAiCompatibleSegment
+                    if (text.Length == 0)
                     {
-                        Id = result.Segments.Count, Start = interval.Start, End = interval.End, Text = text,
-                    };
-                    result.Segments.Add(segment);
-                    segmentProgress?.Report(segment);
+                        progress?.Report(string.Format(hasSignal ? Se.Language.Video.AudioToText.GptEmptyChunk
+                            : Se.Language.Video.AudioToText.GptSilentChunk, interval.Start, interval.End));
+                        continue;
+                    }
+                    var captions = aligned ?? new[] { new OpenAiCompatibleSegment { Start = 0, End = interval.End - interval.Start, Text = text } };
+                    if (aligned == null) result.HasChunkLevelTimings = true;
+                    foreach (var caption in captions)
+                    {
+                        var segment = new OpenAiCompatibleSegment
+                        {
+                            Id = result.Segments.Count, Start = interval.Start + caption.Start, End = interval.Start + caption.End, Text = caption.Text,
+                        };
+                        result.Segments.Add(segment);
+                        segmentProgress?.Report(segment);
+                    }
                 }
                 progress?.Report(string.Format(Se.Language.Video.AudioToText.GptTranscribingParts,
                     Math.Min(first + _concurrency, intervals.Count), intervals.Count));
