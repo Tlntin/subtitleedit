@@ -15,6 +15,8 @@ public partial class SpeechToTextViewModel
         NotifyPropertyChangedFor(nameof(CanEditBatch)), NotifyPropertyChangedFor(nameof(IsGptConfigurationEnabled))]
     private bool _isTestingGptConnection;
     [ObservableProperty] private string _gptConnectionTestStatus = string.Empty;
+    [ObservableProperty] private string _gptSettingsSaveStatus = string.Empty;
+    private bool _loadingGptSettings = true;
     private CancellationTokenSource? _gptConnectionTestCts;
     public bool IsGptConfigurationEnabled => IsTranscribeEnabled && !IsTestingGptConnection;
     public bool CanTestGptConnection => CanEditBatch && IsGptTranscribeVisible;
@@ -26,6 +28,31 @@ public partial class SpeechToTextViewModel
     private void ClearGptConnectionStatus()
     {
         if (!IsTestingGptConnection) GptConnectionTestStatus = string.Empty;
+        MarkGptSettingsChanged();
+    }
+    partial void OnGptTranscribeLanguageChanged(string value) => MarkGptSettingsChanged();
+    partial void OnGptTranscribePromptChanged(string value) => MarkGptSettingsChanged();
+    partial void OnGptTranscribeTimeoutSecondsChanged(int value) => MarkGptSettingsChanged();
+    partial void OnGptTranscribeConcurrencyChanged(int value) => MarkGptSettingsChanged();
+    partial void OnGptTranscribeUseLocalAlignmentChanged(bool value) => MarkGptSettingsChanged();
+    private void MarkGptSettingsChanged()
+    {
+        if (!_loadingGptSettings) GptSettingsSaveStatus = Se.Language.Video.AudioToText.GptSettingsUnsaved;
+    }
+
+    [RelayCommand]
+    private void SaveGptSettings()
+    {
+        if (!CanTestGptConnection) return;
+        try
+        {
+            SaveSettings();
+            GptSettingsSaveStatus = Se.Language.Video.AudioToText.GptSettingsSaved;
+        }
+        catch (Exception)
+        {
+            GptSettingsSaveStatus = Se.Language.Video.AudioToText.GptSettingsSaveFailed;
+        }
     }
 
     [RelayCommand]

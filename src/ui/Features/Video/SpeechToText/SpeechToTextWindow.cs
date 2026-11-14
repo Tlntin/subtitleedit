@@ -477,13 +477,24 @@ public class SpeechToTextWindow : Window
         var cancel = UiUtil.MakeButton(Se.Language.General.Cancel, vm.CancelGptConnectionTestCommand)
             .BindIsVisible(vm, nameof(vm.IsTestingGptConnection));
         var actions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+        var save = UiUtil.MakeButton(Se.Language.Video.AudioToText.GptSaveSettings, vm.SaveGptSettingsCommand)
+            .BindIsEnabled(vm, nameof(vm.CanTestGptConnection));
+        save.Name = "GptSaveSettingsButton";
+        actions.Children.Add(save);
         actions.Children.Add(testButton);
         actions.Children.Add(cancel);
         var hint = new TextBlock { Text = Se.Language.Video.AudioToText.GptConnectionTestHint, TextWrapping = TextWrapping.Wrap, FontSize = 12 };
         var result = EditorChrome.MakeBoundHint(nameof(vm.GptConnectionTestStatus), 12);
         result.TextWrapping = TextWrapping.Wrap;
         result.Name = "GptConnectionTestStatus";
-        return new Control[] { fields, actions, hint, result, timingHint, more };
+        var saved = EditorChrome.MakeBoundHint(nameof(vm.GptSettingsSaveStatus), 12);
+        saved.Name = "GptSettingsSaveStatus";
+        saved.TextWrapping = TextWrapping.Wrap;
+        saved.Bind(IsVisibleProperty, new Binding(nameof(vm.GptSettingsSaveStatus))
+        {
+            Source = vm, Converter = new FuncValueConverter<string, bool>(text => !string.IsNullOrEmpty(text)),
+        });
+        return new Control[] { fields, actions, saved, hint, result, timingHint, more };
     }
 
     private static Control[] MakeOpenRouterSttRows(SpeechToTextViewModel vm)

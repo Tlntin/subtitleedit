@@ -432,6 +432,7 @@ public partial class SpeechToTextViewModel : ObservableObject
         OpenAiCompatibleSttStream = Se.Settings.Tools.OpenAiCompatibleSttStream;
         var savedFormat = Se.Settings.Tools.OpenAiCompatibleSttAudioFormat;
         OpenAiCompatibleSttAudioFormat = OpenAiCompatibleSttAudioFormats.Contains(savedFormat) ? savedFormat : "mp3";
+        _loadingGptSettings = true;
         var tools = Se.Settings.Tools;
         GptTranscribeUrl = tools.GptTranscribeUrl;
         GptTranscribeApiKey = tools.GptTranscribeApiKey;
@@ -452,6 +453,8 @@ public partial class SpeechToTextViewModel : ObservableObject
         GptTranscribeTimeoutSeconds = migrateGpt ? tools.OpenAiCompatibleSttTimeoutSeconds : tools.GptTranscribeTimeoutSeconds;
         GptTranscribeConcurrency = tools.GptTranscribeConcurrency;
         GptTranscribeUseLocalAlignment = tools.GptTranscribeUseLocalAlignment;
+        _loadingGptSettings = false;
+        GptSettingsSaveStatus = string.Empty;
 
         OpenRouterSttApiKey = Se.Settings.Providers.OpenRouterApiKey;
         OpenRouterSttModel = Se.Settings.Tools.OpenRouterSttModel;

@@ -36,6 +36,10 @@ public class LanguageAudioToText
     public string GptPartialSaveFailed { get; set; } = "Cancelled; the partial subtitle could not be saved: {0}";
     public string GptTranscribingChunk { get; set; } = "Transcribing audio chunk {0}/{1} ({2:0.000}–{3:0.000} s)...";
     public string GptSilentChunk { get; set; } = "Audio {0:0.000}–{1:0.000} s contains only digital silence; skipped locally.";
+    public string GptSaveSettings { get; set; } = "Save settings";
+    public string GptSettingsSaved { get; set; } = "Settings saved. They will be restored the next time this window opens.";
+    public string GptSettingsUnsaved { get; set; } = "Settings changed. Click Save settings to keep them.";
+    public string GptSettingsSaveFailed { get; set; } = "Settings could not be saved. Check write access to the application's data folder.";
     public string GptMissingTimings { get; set; } = "The transcription endpoint did not return valid segment start/end times. Select a GPT model with local VAD, or an endpoint supporting diarized_json.";
     public string GptConfigurationRequired { get; set; } = "Configure a valid transcription endpoint and select a supported GPT model.";
     public string GptApiKeyRequired { get; set; } = "Enter the API key for the selected transcription endpoint.";

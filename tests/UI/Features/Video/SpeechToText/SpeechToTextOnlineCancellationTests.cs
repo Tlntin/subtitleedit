@@ -83,6 +83,7 @@ public class SpeechToTextOnlineCancellationTests
     [AvaloniaFact]
     public void MissingAligner_DoesNotUsePostProcessingToInventSentenceTimes()
     {
+        using var settings = new SettingsScope("Tools.AudioToText.WhisperChoice");
         var vm = new SpeechToTextViewModel(new StubWindowService(), new StubFileHelper(), new FolderHelper());
         var window = new SpeechToTextWindow(vm);
         try

@@ -119,6 +119,8 @@ Models ending in `.en` are English-only and perform better for English audio. Mo
 
 Select **OpenAI GPT Transcribe** in the engine list. Enter the complete `/v1/audio/transcriptions` endpoint and API key, then choose a model:
 
+Click **Save settings** below the model selector to persist the endpoint, key, model and related options without starting transcription. The status confirms saving, warns about unsaved edits, or reports a local write failure. Saved settings are restored when the window is reopened. **Test connection** remains a separate action and does not save edits.
+
 | Model | Subtitle timing |
 | --- | --- |
 | `gpt-transcribe` | Continuous context chunks + installed local forced alignment |
