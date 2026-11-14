@@ -1,9 +1,11 @@
 using Avalonia.Controls;
 using Avalonia.Headless.XUnit;
 using Avalonia.LogicalTree;
+using Avalonia.Threading;
 using Nikse.SubtitleEdit.Features.Video.SpeechToText;
 using Nikse.SubtitleEdit.Logic;
 using Nikse.SubtitleEdit.Logic.Media;
+using Nikse.SubtitleEdit.Logic.Config;
 
 namespace UITests.Features.Video.SpeechToText;
 
@@ -97,5 +99,53 @@ public class SpeechToTextWindowLayoutTests : IDisposable
 
         Assert.Contains(vm.TextBoxConsoleLogSingle, content.GetLogicalDescendants());
         Assert.Contains(vm.TextBoxConsoleLogBatch, content.GetLogicalDescendants());
+    }
+
+    [AvaloniaFact]
+    public void FolderAndQueueControls_LockDuringScanningAndTranscription()
+    {
+        var (window, vm, _) = BuildWindow();
+        var commands = new System.Windows.Input.ICommand[]
+        {
+            vm.AddCommand, vm.AddFolderCommand, vm.RemoveCommand, vm.ClearCommand,
+            vm.TranscribeCommand, vm.SingleModeCommand, vm.BatchModeCommand,
+        };
+        var buttons = window.GetLogicalDescendants().OfType<Button>()
+            .Where(b => b.Command != null && commands.Contains(b.Command)).ToArray();
+        Assert.Equal(commands.Length, buttons.Length);
+        Assert.All(buttons, b => Assert.True(b.IsEnabled));
+
+        vm.IsAddingFiles = true;
+        Dispatcher.UIThread.RunJobs();
+        Assert.All(buttons, b => Assert.False(b.IsEnabled));
+
+        // Cancel during file loading keeps the dialog and existing queue available.
+        vm.CancelCommand.Execute(null);
+        Assert.False(vm.OkPressed);
+        vm.IsAddingFiles = false;
+        Dispatcher.UIThread.RunJobs();
+        Assert.All(buttons, b => Assert.True(b.IsEnabled));
+
+        vm.IsTranscribeEnabled = false;
+        Dispatcher.UIThread.RunJobs();
+        Assert.All(buttons, b => Assert.False(b.IsEnabled));
+        vm.IsTranscribeEnabled = true;
+    }
+
+    [AvaloniaFact]
+    public void IncludeSubfolders_DefaultsToOnAndLoadsItsOwnSetting()
+    {
+        Assert.True(new SeAudioToText().IncludeSubfolders);
+        var oldValue = Se.Settings.Tools.AudioToText.IncludeSubfolders;
+        try
+        {
+            Se.Settings.Tools.AudioToText.IncludeSubfolders = false;
+            var (_, vm, _) = BuildWindow();
+            Assert.False(vm.IncludeSubfolders);
+        }
+        finally
+        {
+            Se.Settings.Tools.AudioToText.IncludeSubfolders = oldValue;
+        }
     }
 }

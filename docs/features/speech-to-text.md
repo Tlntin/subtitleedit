@@ -119,11 +119,13 @@ Models ending in `.en` are English-only and perform better for English audio. Mo
 
 Transcribe multiple video files at once:
 1. Click **Batch mode**
-2. Add video files
+2. Add video/audio files, or click **Add folder...** to scan a folder. **Include subfolders when adding a folder** is on by default; turn it off to scan only the selected folder. Dragging folders onto the batch list works too.
 3. Click **Transcribe**
 4. Results are saved as `.srt` files next to the video files
 
 **Add language code to file name** names the output `video.en.srt` instead of `video.srt`.
+
+Folder scans add supported video and audio files, ignoring external subtitles and artwork. Files already in the queue are skipped, including when selected folders overlap. Scanning and reading media info run in the background; the status shows the current folder or file count. **Cancel** (or Escape) stops adding files and keeps rows already added. It does not start transcription.
 
 ## Advanced Settings
 

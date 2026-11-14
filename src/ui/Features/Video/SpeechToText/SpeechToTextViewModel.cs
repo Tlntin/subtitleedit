@@ -69,7 +69,11 @@ public partial class SpeechToTextViewModel : ObservableObject
     [ObservableProperty] private bool _isSingleModeVisible;
     [ObservableProperty] private bool _isWhisperCppActive;
     [ObservableProperty] private bool _isWhisperPurfviewXxlActive;
-    [ObservableProperty] private bool _isTranscribeEnabled;
+    [ObservableProperty, NotifyPropertyChangedFor(nameof(CanEditBatch))] private bool _isTranscribeEnabled;
+    [ObservableProperty, NotifyPropertyChangedFor(nameof(CanEditBatch))] private bool _isAddingFiles;
+    [ObservableProperty] private bool _includeSubfolders;
+    [ObservableProperty] private string _addingFilesStatus = string.Empty;
+    public bool CanEditBatch => IsTranscribeEnabled && !IsAddingFiles;
     [ObservableProperty] private bool _isTranslateVisible;
     [ObservableProperty] private bool _isBackendSelectionVisible;
     [ObservableProperty] private bool _isModelSelectionVisible;
@@ -189,6 +193,8 @@ public partial class SpeechToTextViewModel : ObservableObject
     private readonly VideoInfo _videoInfo = new();
     private bool _abort;
     private CancellationTokenSource? _openAiCts;
+    private CancellationTokenSource? _addFilesCts;
+    private bool _addFilesCancelled;
 
     /// <summary>
     /// Language code reported by an online STT provider for the current run.
@@ -384,6 +390,7 @@ public partial class SpeechToTextViewModel : ObservableObject
         DoIsolateSpeech = Se.Settings.Tools.AudioToText.CrispAsrIsolateSpeech;
         DoDetectSpeakers = Se.Settings.Tools.AudioToText.CrispAsrDetectSpeakers;
         AddLanguageCodeToFileName = Se.Settings.Tools.AudioToText.WhisperAddLanguageCodeToFileName;
+        IncludeSubfolders = Se.Settings.Tools.AudioToText.IncludeSubfolders;
 
         OpenAiCompatibleSttUrl = Se.Settings.Tools.OpenAiCompatibleSttUrl;
         OpenAiCompatibleSttApiKey = Se.Settings.Tools.OpenAiCompatibleSttApiKey;
@@ -458,6 +465,7 @@ public partial class SpeechToTextViewModel : ObservableObject
         }
 
         Se.Settings.Tools.AudioToText.WhisperAddLanguageCodeToFileName = AddLanguageCodeToFileName;
+        Se.Settings.Tools.AudioToText.IncludeSubfolders = IncludeSubfolders;
         var engine = GetEffectiveSelectedEngine();
         engine.CommandLineParameter = Parameters;
         Se.Settings.Tools.AudioToText.WhisperChoice = engine.Choice;
@@ -3674,56 +3682,123 @@ public partial class SpeechToTextViewModel : ObservableObject
     [RelayCommand]
     private async Task Add()
     {
-        var fileNames = await _fileHelper.PickOpenVideoFiles(Window!, Se.Language.General.AddVideoFiles);
-        if (fileNames.Length == 0 || Window == null)
+        if (Window == null || !CanEditBatch)
         {
             return;
         }
 
-        var error = await AddFiles(fileNames);
+        var fileNames = await _fileHelper.PickOpenVideoFiles(Window!, Se.Language.General.AddVideoFiles);
+        await AddFilesAndShowErrors(fileNames);
+    }
 
-        if (error)
+    [RelayCommand]
+    private async Task AddFolder()
+    {
+        if (Window == null || !CanEditBatch)
         {
-            await MessageBox.Show(Window!,
-                 Se.Language.General.UnableToGetVideoInfo,
-                 Se.Language.General.FileSkippedNoVideoInfo,
-             MessageBoxButtons.OK,
-             MessageBoxIcon.Error);
+            return;
+        }
+
+        var folder = await _folderHelper.PickFolderAsync(Window, Se.Language.Tools.BatchConvert.AddFolderDotDotDot);
+        if (!string.IsNullOrEmpty(folder))
+        {
+            await AddFilesAndShowErrors(new[] { folder });
         }
     }
 
-    private async Task<bool> AddFiles(string[] fileNames)
+    private async Task AddFilesAndShowErrors(string[] paths)
     {
-        var error = false;
-        if (Window == null)
+        var error = await AddFiles(paths);
+        if (error && Window != null && !_windowClosing)
+        {
+            await MessageBox.Show(Window,
+                Se.Language.General.UnableToGetVideoInfo,
+                Se.Language.General.FileSkippedNoVideoInfo,
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
+        }
+    }
+
+    private async Task<bool> AddFiles(string[] paths)
+    {
+        if (Window == null || !CanEditBatch || _windowClosing || paths.Length == 0)
         {
             return false;
         }
 
+        var error = false;
+        _addFilesCancelled = false;
+        var existingFiles = BatchItems.Select(p => p.InputVideoFileName).ToArray();
+        var recursive = IncludeSubfolders;
+        using var cts = new CancellationTokenSource();
+        _addFilesCts = cts;
+        var token = cts.Token;
+        IsAddingFiles = true;
+        AddingFilesStatus = Se.Language.General.PleaseWait;
         Window.Cursor = new Cursor(StandardCursorType.Wait);
 
         try
         {
-            // Process files on background thread
-            await Task.Run(async () =>
-            {
-                foreach (var fileName in fileNames)
+            // Scanning and probing can both be slow on large trees/network shares.
+            // Keep the UI responsive, and allow Cancel/Escape to stop adding files.
+            var lastStatusUpdate = Stopwatch.StartNew();
+            var fileNames = await Task.Run(() => SpeechToTextBatchFiles.Collect(
+                paths, existingFiles, recursive, token, folder =>
                 {
-                    var mediaInfo = FfmpegMediaInfo.Parse(fileName);
-                    if (mediaInfo.Duration == null || mediaInfo.Duration.TotalMilliseconds < 1)
+                    if (lastStatusUpdate.ElapsedMilliseconds < 100)
                     {
-                        error = true;
+                        return;
                     }
-                    else
+
+                    lastStatusUpdate.Restart();
+                    Dispatcher.UIThread.Post(() =>
                     {
-                        var batchItem = new SpeechToTextJobItem(fileName, string.Empty, mediaInfo);
-                        await Dispatcher.UIThread.InvokeAsync(() => BatchItems.Add(batchItem));
-                    }
+                        if (IsAddingFiles && !token.IsCancellationRequested)
+                        {
+                            AddingFilesStatus = string.Format(Se.Language.Tools.BatchConvert.ScanningFolderX, folder);
+                        }
+                    });
+                }), token);
+
+            token.ThrowIfCancellationRequested();
+            for (var i = 0; i < fileNames.Count; i++)
+            {
+                token.ThrowIfCancellationRequested();
+                var fileName = fileNames[i];
+                AddingFilesStatus = $"{i + 1}/{fileNames.Count}: {Path.GetFileName(fileName)}";
+                var mediaInfo = await Task.Run(() => FfmpegMediaInfo.Parse(fileName), token);
+                token.ThrowIfCancellationRequested();
+                if (mediaInfo.Duration == null || mediaInfo.Duration.TotalMilliseconds < 1)
+                {
+                    error = true;
+                    continue;
                 }
-            });
+
+                try
+                {
+                    BatchItems.Add(new SpeechToTextJobItem(fileName, string.Empty, mediaInfo));
+                }
+                catch (IOException)
+                {
+                    error = true; // e.g. removed between probing and reading the file size
+                }
+                catch (UnauthorizedAccessException)
+                {
+                    error = true;
+                }
+            }
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested)
+        {
+            // Already-added rows remain usable; cancellation never starts transcription.
+            _addFilesCancelled = true;
+            return false;
         }
         finally
         {
+            _addFilesCts = null;
+            IsAddingFiles = false;
+            AddingFilesStatus = string.Empty;
             Window.Cursor = new Cursor(StandardCursorType.Arrow);
         }
 
@@ -3939,11 +4014,16 @@ public partial class SpeechToTextViewModel : ObservableObject
     [RelayCommand]
     private async Task Transcribe()
     {
+        if (!CanEditBatch)
+        {
+            return;
+        }
+
         if (IsBatchMode && BatchItems.Count == 0)
         {
             await Add();
 
-            if (IsBatchMode && BatchItems.Count == 0)
+            if (_addFilesCancelled || _windowClosing || IsBatchMode && BatchItems.Count == 0)
             {
                 return;
             }
@@ -4332,6 +4412,12 @@ public partial class SpeechToTextViewModel : ObservableObject
     [RelayCommand]
     private void Cancel()
     {
+        if (IsAddingFiles)
+        {
+            _addFilesCts?.Cancel();
+            return;
+        }
+
         if (!IsTranscribeEnabled)
         {
             // Always set _abort, online engines included: during the audio-extraction phase
@@ -6174,7 +6260,7 @@ public partial class SpeechToTextViewModel : ObservableObject
             Dispatcher.UIThread.Post(async () =>
             {
                 await AddFiles(_audioClips.Select(ac => ac.AudioFileName).ToArray());
-                if (_audioClipsAutoStart)
+                if (_audioClipsAutoStart && !_addFilesCancelled && !_windowClosing)
                 {
                     await Transcribe();
                 }
@@ -6190,6 +6276,7 @@ public partial class SpeechToTextViewModel : ObservableObject
         // The speech isolation runs on its own task, not on one of the timers: _abort is what
         // makes it kill its process and stop before it would start the engine on a closed window.
         _windowClosing = true;
+        _addFilesCts?.Cancel();
         _abort = true;
 
         // With the timers gone nothing will ever reap a still-running engine or
@@ -6257,7 +6344,7 @@ public partial class SpeechToTextViewModel : ObservableObject
 
     internal void FileGridOnDragOver(object? sender, DragEventArgs e)
     {
-        if (e.DataTransfer.Contains(DataFormat.File))
+        if (CanEditBatch && e.DataTransfer.Contains(DataFormat.File))
         {
             e.DragEffects = DragDropEffects.Copy; // show copy cursor
         }
@@ -6271,7 +6358,7 @@ public partial class SpeechToTextViewModel : ObservableObject
 
     internal void FileGridOnDrop(object? sender, DragEventArgs e)
     {
-        if (!e.DataTransfer.Contains(DataFormat.File))
+        if (!CanEditBatch || !e.DataTransfer.Contains(DataFormat.File))
         {
             return;
         }
@@ -6281,7 +6368,7 @@ public partial class SpeechToTextViewModel : ObservableObject
         {
             Dispatcher.UIThread.Post(async () =>
             {
-                await AddFiles(files.Select(p => p.Path.LocalPath).ToArray());
+                await AddFilesAndShowErrors(files.Select(p => p.Path.LocalPath).ToArray());
             });
         }
     }

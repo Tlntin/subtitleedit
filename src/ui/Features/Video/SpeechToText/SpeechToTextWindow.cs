@@ -627,12 +627,22 @@ public class SpeechToTextWindow : Window
         Button Action(string icon, string name, System.Windows.Input.ICommand command)
         {
             return EditorChrome.CreateToolButton(icon, name, command, 26)
-                .BindIsEnabled(vm, nameof(vm.IsTranscribeEnabled));
+                .BindIsEnabled(vm, nameof(vm.CanEditBatch));
         }
 
         var buttonAdd = Action("fa-solid fa-plus", Se.Language.General.AddDotDotDot, vm.AddCommand);
+        var buttonAddFolder = Action("fa-solid fa-folder-plus", Se.Language.Tools.BatchConvert.AddFolderDotDotDot, vm.AddFolderCommand);
         var buttonRemove = Action("fa-solid fa-minus", Se.Language.General.Remove, vm.RemoveCommand);
         var buttonClear = Action("fa-solid fa-trash", Se.Language.General.Clear, vm.ClearCommand);
+
+        var includeSubfolders = EditorChrome.MakeSwitchRow(
+            EditorChrome.EnabledBy(EditorChrome.MakeSwitch(nameof(vm.IncludeSubfolders), Se.Language.Tools.BatchConvert.IncludeSubfolders, vm),
+                vm, nameof(vm.CanEditBatch)),
+            Label(Se.Language.Tools.BatchConvert.IncludeSubfolders));
+
+        var addingStatus = EditorChrome.MakeBoundHint(nameof(vm.AddingFilesStatus), 12);
+        addingStatus.TextTrimming = TextTrimming.CharacterEllipsis;
+        addingStatus.WithBindVisible(vm, nameof(vm.IsAddingFiles));
 
         var labelAddLanguageCode = Label(Se.Language.Video.AudioToText.AddLanguageCodeToFileName);
         var switchAddLanguageCode = EditorChrome.EnabledBy(EditorChrome.MakeSwitch(nameof(vm.AddLanguageCodeToFileName), Se.Language.Video.AudioToText.AddLanguageCodeToFileName, vm), vm, nameof(vm.IsTranscribeEnabled));
@@ -655,7 +665,7 @@ public class SpeechToTextWindow : Window
         dropHost.AddHandler(DragDrop.DragOverEvent, vm.FileGridOnDragOver, RoutingStrategies.Bubble);
         dropHost.AddHandler(DragDrop.DropEvent, vm.FileGridOnDrop, RoutingStrategies.Bubble);
 
-        var batchHeader = SpeechToTextChrome.ListHeader(Se.Language.General.BatchMode, buttonAdd, buttonRemove, buttonClear);
+        var batchHeader = SpeechToTextChrome.ListHeader(Se.Language.General.BatchMode, buttonAdd, buttonAddFolder, buttonRemove, buttonClear);
         batchHeader.Margin = new Thickness(0, 14, 0, 8);
 
         var grid = new Grid
@@ -664,6 +674,8 @@ public class SpeechToTextWindow : Window
             {
                 new RowDefinition { Height = new GridLength(1, GridUnitType.Star) }, // Console log
                 new RowDefinition { Height = GridLength.Auto }, // Batch header + actions
+                new RowDefinition { Height = GridLength.Auto }, // Include subfolders
+                new RowDefinition { Height = GridLength.Auto }, // Scan/probe status (Cancel stops adding)
                 new RowDefinition { Height = new GridLength(1, GridUnitType.Star) }, // Batch view
                 new RowDefinition { Height = GridLength.Auto }, // Add language code
             },
@@ -672,8 +684,10 @@ public class SpeechToTextWindow : Window
 
         grid.Add(EditorChrome.MakeListFrame(textBoxConsoleLog), 0, 0);
         grid.Add(batchHeader, 1, 0);
-        grid.Add(EditorChrome.MakeListFrame(dropHost), 2, 0);
-        grid.Add(rowAddLanguageCode, 3, 0);
+        grid.Add(includeSubfolders, 2, 0);
+        grid.Add(addingStatus, 3, 0);
+        grid.Add(EditorChrome.MakeListFrame(dropHost), 4, 0);
+        grid.Add(rowAddLanguageCode, 5, 0);
 
         grid.WithBindVisible(vm, nameof(vm.IsBatchMode));
 
@@ -763,13 +777,13 @@ public class SpeechToTextWindow : Window
             void Update()
             {
                 button.Classes.Set("active", vm.IsBatchMode == batch);
-                button.IsEnabled = vm.IsTranscribeEnabled;
+                button.IsEnabled = vm.CanEditBatch;
             }
 
             Update();
             vm.PropertyChanged += (_, e) =>
             {
-                if (e.PropertyName is nameof(vm.IsBatchMode) or nameof(vm.IsTranscribeEnabled))
+                if (e.PropertyName is nameof(vm.IsBatchMode) or nameof(vm.CanEditBatch))
                 {
                     Update();
                 }
@@ -801,7 +815,7 @@ public class SpeechToTextWindow : Window
         });
 
         var transcribeButton = EditorChrome.AsPrimary(UiUtil.MakeButton(Se.Language.Video.AudioToText.Transcribe, vm.TranscribeCommand))
-            .BindIsEnabled(vm, nameof(vm.IsTranscribeEnabled));
+            .BindIsEnabled(vm, nameof(vm.CanEditBatch));
         var bar = EditorChrome.MakeButtonBar(modes, UiUtil.MakeButtonCancel(vm.CancelCommand), transcribeButton);
         bar.Name = ButtonBarName;
         return bar;

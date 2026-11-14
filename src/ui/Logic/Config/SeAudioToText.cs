@@ -12,6 +12,7 @@ public class SeAudioToText
     public string WhisperChoice { get; set; } = WhisperChoices.Cpp;
 
     public bool WhisperAddLanguageCodeToFileName { get; set; }
+    public bool IncludeSubfolders { get; set; } = true;
 
     public string? WhisperModel { get; set; } = string.Empty;
 
