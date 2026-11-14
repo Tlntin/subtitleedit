@@ -1,4 +1,4 @@
-﻿using Avalonia.Controls;
+using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
@@ -72,6 +72,12 @@ public partial class SpeechToTextViewModel : ObservableObject
     [ObservableProperty, NotifyPropertyChangedFor(nameof(CanEditBatch))] private bool _isTranscribeEnabled;
     [ObservableProperty, NotifyPropertyChangedFor(nameof(CanEditBatch))] private bool _isAddingFiles;
     [ObservableProperty] private bool _includeSubfolders;
+    [ObservableProperty] private bool _skipEmbeddedSubtitles;
+    [ObservableProperty] private bool _skipExternalSubtitles;
+    [ObservableProperty] private string _batchEstimatedText = string.Empty;
+    [ObservableProperty, NotifyPropertyChangedFor(nameof(BatchSkippedText))] private int _skippedBatchCount;
+    public string BatchSkippedText => SkippedBatchCount == 0 ? string.Empty
+        : string.Format(Se.Language.Video.AudioToText.SkippedFilesX, SkippedBatchCount);
     [ObservableProperty] private string _addingFilesStatus = string.Empty;
     public bool CanEditBatch => IsTranscribeEnabled && !IsAddingFiles;
     [ObservableProperty] private bool _isTranslateVisible;
@@ -188,6 +194,7 @@ public partial class SpeechToTextViewModel : ObservableObject
     private readonly ConcurrentQueue<string> _outputText = new();
     private long _startTicks = 0;
     private long _runStartTicks;
+    private SpeechToTextBatchProgress? _batchProgress;
     private double _endSeconds;
     private double _showProgressPct = -1;
     private readonly VideoInfo _videoInfo = new();
@@ -234,6 +241,7 @@ public partial class SpeechToTextViewModel : ObservableObject
     private Process _whisperProcess = new();
     private Process? _audioExtractProcess;
     private readonly System.Timers.Timer _timerAudioExtract = new();
+    private readonly System.Timers.Timer _timerBatchProgress = new(500);
     private volatile bool _windowClosing;
     // Held while a transcription runs, so a long (batch) run is not cut short by the machine
     // idling into sleep (#15552). Driven by IsTranscribeEnabled, which every end-of-run path resets.
@@ -380,6 +388,7 @@ public partial class SpeechToTextViewModel : ObservableObject
 
         _timerAudioExtract.Interval = 100;
         _timerAudioExtract.Elapsed += OnTimerAudioExtractOnElapsed;
+        _timerBatchProgress.Elapsed += OnTimerBatchProgressElapsed;
     }
 
     private void LoadSettings()
@@ -391,6 +400,8 @@ public partial class SpeechToTextViewModel : ObservableObject
         DoDetectSpeakers = Se.Settings.Tools.AudioToText.CrispAsrDetectSpeakers;
         AddLanguageCodeToFileName = Se.Settings.Tools.AudioToText.WhisperAddLanguageCodeToFileName;
         IncludeSubfolders = Se.Settings.Tools.AudioToText.IncludeSubfolders;
+        SkipEmbeddedSubtitles = Se.Settings.Tools.AudioToText.SkipEmbeddedSubtitles;
+        SkipExternalSubtitles = Se.Settings.Tools.AudioToText.SkipExternalSubtitles;
 
         OpenAiCompatibleSttUrl = Se.Settings.Tools.OpenAiCompatibleSttUrl;
         OpenAiCompatibleSttApiKey = Se.Settings.Tools.OpenAiCompatibleSttApiKey;
@@ -466,6 +477,8 @@ public partial class SpeechToTextViewModel : ObservableObject
 
         Se.Settings.Tools.AudioToText.WhisperAddLanguageCodeToFileName = AddLanguageCodeToFileName;
         Se.Settings.Tools.AudioToText.IncludeSubfolders = IncludeSubfolders;
+        Se.Settings.Tools.AudioToText.SkipEmbeddedSubtitles = SkipEmbeddedSubtitles;
+        Se.Settings.Tools.AudioToText.SkipExternalSubtitles = SkipExternalSubtitles;
         var engine = GetEffectiveSelectedEngine();
         engine.CommandLineParameter = Parameters;
         Se.Settings.Tools.AudioToText.WhisperChoice = engine.Choice;
@@ -874,7 +887,7 @@ public partial class SpeechToTextViewModel : ObservableObject
                 var durationMs = (DateTime.UtcNow.Ticks - _startTicks) / 10_000;
                 ProgressText = GetProgressText();
 
-                ElapsedText = $"Time elapsed: {new TimeCode(durationMs).ToShortDisplayString()}";
+                UpdateElapsedAndBatchProgress();
                 if (_endSeconds <= 0)
                 {
                     if (_showProgressPct > 0)
@@ -901,7 +914,10 @@ public partial class SpeechToTextViewModel : ObservableObject
                     SetProgressBarPct(_endSeconds * 100.0 / _videoInfo.TotalSeconds);
                 }
 
-                EstimatedText = ProgressHelper.ToProgressTime(msEstimatedLeft);
+                EstimatedText = IsBatchMode
+                    ? string.Format(Se.Language.Video.AudioToText.CurrentFileRemainingX,
+                        SpeechToTextBatchProgress.FormatDuration(TimeSpan.FromMilliseconds(Math.Max(0, msEstimatedLeft))))
+                    : ProgressHelper.ToProgressTime(msEstimatedLeft);
 
                 return;
             }
@@ -1631,10 +1647,11 @@ public partial class SpeechToTextViewModel : ObservableObject
                 if (_startTicks > 0)
                 {
                     var durationMs = (DateTime.UtcNow.Ticks - _startTicks) / 10_000;
-                    ElapsedText = $"Time elapsed: {new TimeCode(durationMs).ToShortDisplayString()}";
+                    UpdateElapsedAndBatchProgress();
                 }
                 if (_videoInfo.TotalSeconds > 0)
                 {
+                    _endSeconds = Math.Max(_endSeconds, seg.End);
                     SetProgressBarPct(seg.End / _videoInfo.TotalSeconds * 100.0);
                 }
                 lock (subtitle.Paragraphs)
@@ -2081,6 +2098,36 @@ public partial class SpeechToTextViewModel : ObservableObject
         }
     }
 
+    private void OnTimerBatchProgressElapsed(object? sender, ElapsedEventArgs args)
+    {
+        if (_windowClosing || IsTranscribeEnabled) return;
+        Dispatcher.UIThread.Post(() =>
+        {
+            if (!_windowClosing && !IsTranscribeEnabled) UpdateElapsedAndBatchProgress();
+        });
+    }
+
+    private void UpdateElapsedAndBatchProgress()
+    {
+        var now = DateTime.UtcNow;
+        if (IsBatchMode && _batchProgress != null)
+        {
+            ElapsedText = string.Format(Se.Language.Video.AudioToText.BatchElapsedX,
+                SpeechToTextBatchProgress.FormatDuration(TimeSpan.FromTicks(Math.Max(0, now.Ticks - _runStartTicks))));
+            var fraction = _showProgressPct > 0 ? _showProgressPct / 100.0
+                : _videoInfo.TotalSeconds > 0 ? _endSeconds / _videoInfo.TotalSeconds : 0;
+            var remaining = _batchProgress.EstimateRemaining(fraction, now);
+            BatchEstimatedText = remaining.HasValue
+                ? string.Format(Se.Language.Video.AudioToText.BatchRemainingX,
+                    SpeechToTextBatchProgress.FormatDuration(remaining.Value))
+                : Se.Language.Video.AudioToText.BatchRemainingCalculating;
+        }
+        else if (_startTicks > 0)
+        {
+            ElapsedText = $"Time elapsed: {new TimeCode((now.Ticks - _startTicks) / 10_000).ToShortDisplayString()}";
+        }
+    }
+
     /// <summary>
     /// Batch "done" dialog: one card per generated subtitle with show in folder / copy path
     /// (failed media keep their status), instead of a plain "Videos converted: N" message box -
@@ -2104,6 +2151,7 @@ public partial class SpeechToTextViewModel : ObservableObject
         var headline = doneCount == files.Count
             ? string.Format(Se.Language.Video.AudioToText.SubtitleFilesGeneratedX, doneCount)
             : string.Format(Se.Language.Video.AudioToText.SubtitleFilesGeneratedXOfY, doneCount, files.Count);
+        if (SkippedBatchCount > 0) headline += " · " + BatchSkippedText;
 
         await _windowService.ShowDialogAsync<PromptFilesSavedWindow, PromptFilesSavedViewModel>(Window!, vm =>
         {
@@ -2141,6 +2189,7 @@ public partial class SpeechToTextViewModel : ObservableObject
     {
         var currentItem = _jobItems[_batchIndex];
         ApplyBatchItemResult(currentItem, transcribedSubtitle);
+        _batchProgress?.CompleteItem(currentItem.Status == Se.Language.General.Converted, DateTime.UtcNow);
         if (currentItem.Status == Se.Language.General.Converted)
         {
             var languageCode = AddLanguageCodeToFileName ? GetFileNameLanguageCode(transcribedSubtitle) : null;
@@ -2179,6 +2228,7 @@ public partial class SpeechToTextViewModel : ObservableObject
             ProgressOpacity = 1;
             ProgressText = Se.Language.General.GeneratingAudioFile;
             _startTicks = DateTime.UtcNow.Ticks;
+            UpdateElapsedAndBatchProgress();
 
             Dispatcher.UIThread.Post(() =>
             {
@@ -2214,6 +2264,7 @@ public partial class SpeechToTextViewModel : ObservableObject
             ProgressText = string.Empty;
             EstimatedText = string.Empty;
             ElapsedText = string.Empty;
+            BatchEstimatedText = string.Empty;
 
             if (_audioClips != null)
             {
@@ -3034,7 +3085,7 @@ public partial class SpeechToTextViewModel : ObservableObject
             if (!_audioExtractProcess.HasExited)
             {
                 var durationMs = (DateTime.UtcNow.Ticks - _startTicks) / 10_000;
-                ElapsedText = $"Time elapsed: {new TimeCode(durationMs).ToShortDisplayString()}";
+                UpdateElapsedAndBatchProgress();
 
                 return;
             }
@@ -3391,7 +3442,7 @@ public partial class SpeechToTextViewModel : ObservableObject
             }
 
             var durationMs = (DateTime.UtcNow.Ticks - _startTicks) / 10_000;
-            ElapsedText = $"Time elapsed: {new TimeCode(durationMs).ToShortDisplayString()}";
+            UpdateElapsedAndBatchProgress();
             await Task.Delay(100);
         }
 
@@ -4009,7 +4060,56 @@ public partial class SpeechToTextViewModel : ObservableObject
         return vm.OkPressed;
     }
 
-    partial void OnIsTranscribeEnabledChanged(bool value) => _sleepInhibitor.SetActive(!value);
+    partial void OnIsTranscribeEnabledChanged(bool value)
+    {
+        _sleepInhibitor.SetActive(!value);
+        if (value) _timerBatchProgress.Stop();
+        else _timerBatchProgress.Start();
+    }
+
+    internal async Task<List<SpeechToTextJobItem>?> PrepareBatchItemsAsync()
+    {
+        var items = BatchItems.ToList();
+        ResetBatchStatuses(items);
+        SkippedBatchCount = 0;
+        if (!SkipEmbeddedSubtitles && !SkipExternalSubtitles) return items;
+
+        var embedded = SkipEmbeddedSubtitles;
+        var external = SkipExternalSubtitles;
+        var result = new List<SpeechToTextJobItem>();
+        using var cts = new CancellationTokenSource();
+        _addFilesCts = cts;
+        IsAddingFiles = true;
+        try
+        {
+            var detection = new SpeechToTextSubtitleDetection();
+            for (var i = 0; i < items.Count; i++)
+            {
+                cts.Token.ThrowIfCancellationRequested();
+                var item = items[i];
+                AddingFilesStatus = $"{i + 1}/{items.Count}: {Path.GetFileName(item.InputVideoFileName)}";
+                var kind = await Task.Run(() => detection.Detect(item, embedded, external), cts.Token);
+                cts.Token.ThrowIfCancellationRequested();
+                if (kind == ExistingSubtitleKind.None) result.Add(item);
+                else
+                {
+                    item.Status = kind == ExistingSubtitleKind.Embedded
+                        ? Se.Language.Video.AudioToText.SkippedEmbeddedSubtitles
+                        : Se.Language.Video.AudioToText.SkippedExternalSubtitles;
+                    SkippedBatchCount++;
+                }
+            }
+
+            return result;
+        }
+        catch (OperationCanceledException) when (cts.IsCancellationRequested) { return null; }
+        finally
+        {
+            _addFilesCts = null;
+            IsAddingFiles = false;
+            AddingFilesStatus = string.Empty;
+        }
+    }
 
     [RelayCommand]
     private async Task Transcribe()
@@ -4018,6 +4118,9 @@ public partial class SpeechToTextViewModel : ObservableObject
         {
             return;
         }
+
+        _batchProgress = null;
+        BatchEstimatedText = string.Empty;
 
         if (IsBatchMode && BatchItems.Count == 0)
         {
@@ -4029,15 +4132,23 @@ public partial class SpeechToTextViewModel : ObservableObject
             }
         }
 
+        List<SpeechToTextJobItem>? preparedBatch = null;
+        if (IsBatchMode && _audioClips == null)
+        {
+            SaveSettings();
+            preparedBatch = await PrepareBatchItemsAsync();
+            if (preparedBatch == null || preparedBatch.Count == 0 || _windowClosing) return;
+        }
+
         if (IsBatchMode && BatchItems.Count > 0)
         {
-            _videoFileName = BatchItems[0].InputVideoFileName;
+            _videoFileName = (preparedBatch ?? BatchItems.ToList())[0].InputVideoFileName;
 
             // Every run picks its output folder anew - a folder chosen for an earlier batch
             // in this dialog session must not silently receive a later batch's output.
             _batchOutputFolder = null;
 
-            if (BatchItems.Any(b => DocumentPortal.IsPortalPath(b.InputVideoFileName)))
+            if ((preparedBatch ?? BatchItems.ToList()).Any(b => DocumentPortal.IsPortalPath(b.InputVideoFileName)))
             {
                 // Videos opened through the Flatpak document portal live in a single-file
                 // grant where a sibling .srt can never materialize as a real file (issue
@@ -4322,7 +4433,7 @@ public partial class SpeechToTextViewModel : ObservableObject
         }
         else
         {
-            _jobItems = BatchItems;
+            _jobItems = preparedBatch ?? BatchItems.ToList();
             ResetBatchStatuses(_jobItems);
         }
 
@@ -4342,6 +4453,12 @@ public partial class SpeechToTextViewModel : ObservableObject
 
         _batchIndex = 0;
         _runStartTicks = DateTime.UtcNow.Ticks;
+        _batchProgress = IsBatchMode
+            ? new SpeechToTextBatchProgress(_jobItems.Select(p => p.MediaInfo.Duration.TotalSeconds), DateTime.UtcNow)
+            : null;
+        _endSeconds = 0;
+        _showProgressPct = -1;
+        UpdateElapsedAndBatchProgress();
 
         if (_jobItems.Count == 0)
         {
@@ -6272,6 +6389,7 @@ public partial class SpeechToTextViewModel : ObservableObject
     {
         _timerWhisper.StopAndDispose(OnTimerWhisperOnElapsed);
         _timerAudioExtract.StopAndDispose(OnTimerAudioExtractOnElapsed);
+        _timerBatchProgress.StopAndDispose(OnTimerBatchProgressElapsed);
 
         // The speech isolation runs on its own task, not on one of the timers: _abort is what
         // makes it kill its process and stop before it would start the engine on a closed window.

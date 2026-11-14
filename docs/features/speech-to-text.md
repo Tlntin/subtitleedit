@@ -127,6 +127,10 @@ Transcribe multiple video files at once:
 
 Folder scans add supported video and audio files, ignoring external subtitles and artwork. Files already in the queue are skipped, including when selected folders overlap. Scanning and reading media info run in the background; the status shows the current folder or file count. **Cancel** (or Escape) stops adding files and keeps rows already added. It does not start transcription.
 
+Use the **Skip files with existing subtitles...** button above the batch list to independently enable skipping embedded subtitle tracks or external subtitles. Both are off by default. Checks run when starting the batch, so subtitles created since loading the queue are detected too. External subtitles must be beside the media and share its full base name, optionally followed by language/forced tags, e.g. `movie.srt`, `movie.zh-Hans.srt`, `movie.en.forced.ass`. Common text and image sidecars (including `.idx`/`.sub` and `.sup`) are supported; unrelated episode names and metadata such as `movie.xml` do not match. Skipped rows remain visible with a reason and a count; they are excluded from transcription and the time estimate.
+
+During a batch, **Current file remaining** and **Entire batch remaining** are separate. The batch estimate includes all queued media durations and uses completed files as a speed sample while the next file has no progress yet, including audio extraction. Before the first usable sample it displays **estimating...**. Elapsed time covers the whole batch and estimates can show more than 24 hours.
+
 ## Advanced Settings
 
 Click the **Advanced** button to configure custom command-line arguments for the Whisper engine:

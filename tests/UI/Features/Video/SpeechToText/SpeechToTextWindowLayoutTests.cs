@@ -114,10 +114,13 @@ public class SpeechToTextWindowLayoutTests : IDisposable
             .Where(b => b.Command != null && commands.Contains(b.Command)).ToArray();
         Assert.Equal(commands.Length, buttons.Length);
         Assert.All(buttons, b => Assert.True(b.IsEnabled));
+        var skipButton = Named(window, "SpeechToTextSkipExistingSubtitles");
+        Assert.True(skipButton.IsEnabled);
 
         vm.IsAddingFiles = true;
         Dispatcher.UIThread.RunJobs();
         Assert.All(buttons, b => Assert.False(b.IsEnabled));
+        Assert.False(skipButton.IsEnabled);
 
         // Cancel during file loading keeps the dialog and existing queue available.
         vm.CancelCommand.Execute(null);
@@ -125,6 +128,7 @@ public class SpeechToTextWindowLayoutTests : IDisposable
         vm.IsAddingFiles = false;
         Dispatcher.UIThread.RunJobs();
         Assert.All(buttons, b => Assert.True(b.IsEnabled));
+        Assert.True(skipButton.IsEnabled);
 
         vm.IsTranscribeEnabled = false;
         Dispatcher.UIThread.RunJobs();
@@ -136,6 +140,8 @@ public class SpeechToTextWindowLayoutTests : IDisposable
     public void IncludeSubfolders_DefaultsToOnAndLoadsItsOwnSetting()
     {
         Assert.True(new SeAudioToText().IncludeSubfolders);
+        Assert.False(new SeAudioToText().SkipEmbeddedSubtitles);
+        Assert.False(new SeAudioToText().SkipExternalSubtitles);
         var oldValue = Se.Settings.Tools.AudioToText.IncludeSubfolders;
         try
         {

@@ -7,6 +7,17 @@ public class LanguageAudioToText
     public string TranslateToEnglish { get; set; }
     public string Transcribing { get; set; }
     public string TranscribingXOfY { get; set; }
+    public string SkipExistingSubtitles { get; set; } = "Skip files with existing subtitles...";
+    public string SkipEmbeddedSubtitles { get; set; } = "Skip files with embedded subtitle tracks";
+    public string SkipExternalSubtitles { get; set; } = "Skip files with external subtitles";
+    public string SkipExistingSubtitlesHint { get; set; } = "Checked when starting a batch. External subtitles must be beside the media with the same name, optionally followed by a language tag (movie.en.srt).";
+    public string SkippedEmbeddedSubtitles { get; set; } = "Skipped: embedded subtitles";
+    public string SkippedExternalSubtitles { get; set; } = "Skipped: external subtitles";
+    public string SkippedFilesX { get; set; } = "Skipped files: {0}";
+    public string CurrentFileRemainingX { get; set; } = "Current file remaining: {0}";
+    public string BatchRemainingX { get; set; } = "Entire batch remaining: {0}";
+    public string BatchRemainingCalculating { get; set; } = "Entire batch remaining: estimating...";
+    public string BatchElapsedX { get; set; } = "Batch elapsed: {0}";
     public string SubtitleFilesGenerated { get; set; }
     public string SubtitleFilesGeneratedX { get; set; }
     public string SubtitleFilesGeneratedXOfY { get; set; }

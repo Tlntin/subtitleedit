@@ -13,6 +13,8 @@ public class SeAudioToText
 
     public bool WhisperAddLanguageCodeToFileName { get; set; }
     public bool IncludeSubfolders { get; set; } = true;
+    public bool SkipEmbeddedSubtitles { get; set; }
+    public bool SkipExternalSubtitles { get; set; }
 
     public string? WhisperModel { get; set; } = string.Empty;
 

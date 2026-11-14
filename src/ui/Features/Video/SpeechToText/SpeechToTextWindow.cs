@@ -632,6 +632,30 @@ public class SpeechToTextWindow : Window
 
         var buttonAdd = Action("fa-solid fa-plus", Se.Language.General.AddDotDotDot, vm.AddCommand);
         var buttonAddFolder = Action("fa-solid fa-folder-plus", Se.Language.Tools.BatchConvert.AddFolderDotDotDot, vm.AddFolderCommand);
+        var skipOptions = new StackPanel { Spacing = 8, MaxWidth = 360 };
+        EditorChrome.EnabledBy(skipOptions, vm, nameof(vm.CanEditBatch));
+        skipOptions.Children.Add(EditorChrome.MakeSwitchRow(
+            EditorChrome.MakeSwitch(nameof(vm.SkipEmbeddedSubtitles), Se.Language.Video.AudioToText.SkipEmbeddedSubtitles, vm),
+            Se.Language.Video.AudioToText.SkipEmbeddedSubtitles));
+        skipOptions.Children.Add(EditorChrome.MakeSwitchRow(
+            EditorChrome.MakeSwitch(nameof(vm.SkipExternalSubtitles), Se.Language.Video.AudioToText.SkipExternalSubtitles, vm),
+            Se.Language.Video.AudioToText.SkipExternalSubtitles));
+        skipOptions.Children.Add(new TextBlock
+        {
+            Text = Se.Language.Video.AudioToText.SkipExistingSubtitlesHint,
+            TextWrapping = TextWrapping.Wrap,
+            FontSize = EditorChrome.ScaledFont(12),
+        });
+        var buttonSkip = EditorChrome.CreateToolButton("fa-solid fa-forward", Se.Language.Video.AudioToText.SkipExistingSubtitles, null, 26)
+            .BindIsEnabled(vm, nameof(vm.CanEditBatch));
+        buttonSkip.Name = "SpeechToTextSkipExistingSubtitles";
+        buttonSkip.Flyout = new Flyout { Content = skipOptions };
+        void UpdateSkipButton() => buttonSkip.Classes.Set("active", vm.SkipEmbeddedSubtitles || vm.SkipExternalSubtitles);
+        UpdateSkipButton();
+        vm.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName is nameof(vm.SkipEmbeddedSubtitles) or nameof(vm.SkipExternalSubtitles)) UpdateSkipButton();
+        };
         var buttonRemove = Action("fa-solid fa-minus", Se.Language.General.Remove, vm.RemoveCommand);
         var buttonClear = Action("fa-solid fa-trash", Se.Language.General.Clear, vm.ClearCommand);
 
@@ -643,6 +667,14 @@ public class SpeechToTextWindow : Window
         var addingStatus = EditorChrome.MakeBoundHint(nameof(vm.AddingFilesStatus), 12);
         addingStatus.TextTrimming = TextTrimming.CharacterEllipsis;
         addingStatus.WithBindVisible(vm, nameof(vm.IsAddingFiles));
+        var skippedStatus = EditorChrome.MakeBoundHint(nameof(vm.BatchSkippedText), 12);
+        skippedStatus.Bind(IsVisibleProperty, new Binding(nameof(vm.SkippedBatchCount))
+        {
+            Source = vm, Converter = new FuncValueConverter<int, bool>(count => count > 0),
+        });
+        var folderOptions = new StackPanel { Spacing = 4 };
+        folderOptions.Children.Add(includeSubfolders);
+        folderOptions.Children.Add(skippedStatus);
 
         var labelAddLanguageCode = Label(Se.Language.Video.AudioToText.AddLanguageCodeToFileName);
         var switchAddLanguageCode = EditorChrome.EnabledBy(EditorChrome.MakeSwitch(nameof(vm.AddLanguageCodeToFileName), Se.Language.Video.AudioToText.AddLanguageCodeToFileName, vm), vm, nameof(vm.IsTranscribeEnabled));
@@ -665,7 +697,7 @@ public class SpeechToTextWindow : Window
         dropHost.AddHandler(DragDrop.DragOverEvent, vm.FileGridOnDragOver, RoutingStrategies.Bubble);
         dropHost.AddHandler(DragDrop.DropEvent, vm.FileGridOnDrop, RoutingStrategies.Bubble);
 
-        var batchHeader = SpeechToTextChrome.ListHeader(Se.Language.General.BatchMode, buttonAdd, buttonAddFolder, buttonRemove, buttonClear);
+        var batchHeader = SpeechToTextChrome.ListHeader(Se.Language.General.BatchMode, buttonAdd, buttonAddFolder, buttonSkip, buttonRemove, buttonClear);
         batchHeader.Margin = new Thickness(0, 14, 0, 8);
 
         var grid = new Grid
@@ -684,7 +716,7 @@ public class SpeechToTextWindow : Window
 
         grid.Add(EditorChrome.MakeListFrame(textBoxConsoleLog), 0, 0);
         grid.Add(batchHeader, 1, 0);
-        grid.Add(includeSubfolders, 2, 0);
+        grid.Add(folderOptions, 2, 0);
         grid.Add(addingStatus, 3, 0);
         grid.Add(EditorChrome.MakeListFrame(dropHost), 4, 0);
         grid.Add(rowAddLanguageCode, 5, 0);
@@ -724,21 +756,26 @@ public class SpeechToTextWindow : Window
         var progressText = EditorChrome.MakeBoundHint(nameof(vm.ProgressText), 12);
         var elapsedTimeText = EditorChrome.MakeBoundHint(nameof(vm.ElapsedText), 12);
         var estimatedTimeText = EditorChrome.MakeBoundHint(nameof(vm.EstimatedText), 12);
+        var batchEstimatedTimeText = EditorChrome.MakeBoundHint(nameof(vm.BatchEstimatedText), 12);
+        batchEstimatedTimeText.WithBindVisible(vm, nameof(vm.IsBatchMode));
 
-        var times = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 16, VerticalAlignment = VerticalAlignment.Center };
+        var times = new WrapPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+        elapsedTimeText.Margin = new Thickness(0, 0, 16, 0);
+        estimatedTimeText.Margin = new Thickness(0, 0, 16, 0);
         times.Children.Add(elapsedTimeText);
         times.Children.Add(estimatedTimeText);
+        times.Children.Add(batchEstimatedTimeText);
 
         var grid = new Grid
         {
             ColumnSpacing = 12,
             RowSpacing = 4,
             ColumnDefinitions = { new ColumnDefinition(new GridLength(1, GridUnitType.Star)), new ColumnDefinition(GridLength.Auto) },
-            RowDefinitions = { new RowDefinition(GridLength.Auto), new RowDefinition(GridLength.Auto) },
+            RowDefinitions = { new RowDefinition(GridLength.Auto), new RowDefinition(GridLength.Auto), new RowDefinition(GridLength.Auto) },
         };
-        grid.Add(progressBar, 0, 0);
-        grid.Add(times, 0, 1);
+        grid.Add(progressBar, 0, 0, 1, 2);
         grid.Add(progressText, 1, 0, 1, 2);
+        grid.Add(times, 2, 0, 1, 2);
 
         // Shown while the view model shows its progress (ProgressOpacity), like the old fading
         // progress bar and texts.
