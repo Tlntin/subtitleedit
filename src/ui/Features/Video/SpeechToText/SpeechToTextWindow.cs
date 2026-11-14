@@ -314,6 +314,9 @@ public class SpeechToTextWindow : Window
     {
         var groups = new StackPanel();
         groups.Children.Add(MakeOnlineGroup(vm, nameof(vm.IsOpenAiCompatibleSttVisible), MakeOpenAiCompatibleSttRows(vm)));
+        var gptGroup = MakeOnlineGroup(vm, nameof(vm.IsGptTranscribeVisible), MakeGptTranscribeRows(vm));
+        EditorChrome.EnabledBy(gptGroup, vm, nameof(vm.IsTranscribeEnabled));
+        groups.Children.Add(gptGroup);
         groups.Children.Add(MakeOnlineGroup(vm, nameof(vm.IsOpenRouterSttVisible), MakeOpenRouterSttRows(vm)));
         groups.Children.Add(MakeOnlineGroup(vm, nameof(vm.IsDashScopeSttVisible), MakeDashScopeSttRows(vm)));
         groups.Children.Add(MakeOnlineGroup(vm, nameof(vm.IsGoogleCloudSttVisible), MakeGoogleCloudSttRows(vm)));
@@ -325,6 +328,7 @@ public class SpeechToTextWindow : Window
             Bindings =
             {
                 new Binding(nameof(vm.IsOpenAiCompatibleSttVisible)) { Source = vm },
+                new Binding(nameof(vm.IsGptTranscribeVisible)) { Source = vm },
                 new Binding(nameof(vm.IsOpenRouterSttVisible)) { Source = vm },
                 new Binding(nameof(vm.IsDashScopeSttVisible)) { Source = vm },
                 new Binding(nameof(vm.IsGoogleCloudSttVisible)) { Source = vm },
@@ -433,6 +437,33 @@ public class SpeechToTextWindow : Window
             OnlineRow(Se.Language.General.OpenAiCompatibleSttExtraHeaders, textExtraHeaders),
             OnlineRow(Se.Language.General.OpenAiCompatibleSttAudioFormat, comboAudioFormat),
             OnlineSwitch(vm, nameof(vm.OpenAiCompatibleSttStream), Se.Language.General.OpenAiCompatibleSttStream, Se.Language.General.OpenAiCompatibleSttStreamHint),
+        };
+    }
+
+    private static Control[] MakeGptTranscribeRows(SpeechToTextViewModel vm)
+    {
+        var models = UiUtil.MakeComboBox(vm.GptModels, vm, nameof(vm.SelectedGptTranscribeModel));
+        models.HorizontalAlignment = HorizontalAlignment.Stretch;
+        var timingHint = EditorChrome.MakeBoundHint(nameof(vm.GptTimingHint), 12);
+        timingHint.TextWrapping = TextWrapping.Wrap;
+        var prompt = OnlineRow(Se.Language.General.Prompt, OnlineText(vm, nameof(vm.GptTranscribePrompt)));
+        prompt.WithBindVisible(vm, nameof(vm.GptPromptAvailable));
+        var advanced = new StackPanel { Spacing = 10 };
+        advanced.Children.Add(OnlineRow(Se.Language.General.OpenAiCompatibleSttTimeout,
+            OnlineNumber(vm, nameof(vm.GptTranscribeTimeoutSeconds), 30, 21600, "F0")));
+        advanced.Children.Add(OnlineRow(Se.Language.Video.AudioToText.GptConcurrentRequests,
+            OnlineNumber(vm, nameof(vm.GptTranscribeConcurrency), 1, 4, "F0")));
+        advanced.Children.Add(OnlineRow(Se.Language.General.OpenAiCompatibleSttExtraHeaders,
+            OnlineText(vm, nameof(vm.GptTranscribeExtraHeaders))));
+        return new Control[]
+        {
+            OnlineRow(Se.Language.General.OpenAiCompatibleSttEndpoint, OnlineText(vm, nameof(vm.GptTranscribeUrl))),
+            OnlineRow(Se.Language.General.OpenAiCompatibleSttApiKey, OnlineApiKey(vm, nameof(vm.GptTranscribeApiKey))),
+            OnlineRow(Se.Language.General.Model, models),
+            timingHint,
+            OnlineRow(Se.Language.General.OpenAiCompatibleSttLanguage, OnlineText(vm, nameof(vm.GptTranscribeLanguage))),
+            prompt,
+            new Expander { Header = Se.Language.Video.AudioToText.GptMoreSettings, Content = advanced, IsExpanded = false },
         };
     }
 

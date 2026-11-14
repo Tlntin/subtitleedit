@@ -115,6 +115,28 @@ Each engine has its own set of models. Common model sizes:
 
 Models ending in `.en` are English-only and perform better for English audio. Models with another language suffix are fine-tunes for that language: the Swedish `.sv` and Norwegian `.nb` models, and `anime.ja` - [anime-whisper](https://huggingface.co/litagin/anime-whisper), a Japanese fine-tune for anime and visual novel dialogue, offered by Whisper CPP, Purfview Faster Whisper XXL, Whisper CTranslate2 and WhisperX.
 
+## OpenAI GPT Transcribe
+
+Select **OpenAI GPT Transcribe** in the engine list. Enter the complete `/v1/audio/transcriptions` endpoint and API key, then choose a model:
+
+| Model | Subtitle timing |
+| --- | --- |
+| `gpt-transcribe` | Local Silero VAD speech intervals |
+| `gpt-4o-transcribe` | Local Silero VAD speech intervals |
+| `gpt-4o-mini-transcribe` | Local Silero VAD speech intervals |
+| `gpt-4o-mini-transcribe-2025-12-15` | Local Silero VAD speech intervals |
+| `gpt-4o-transcribe-diarize` | Native API segment start/end times (`diarized_json`) |
+
+For models returning text without timestamps, Subtitle Edit decodes the audio locally, detects speech with the bundled Silero VAD model, and sends only the detected clips. Each returned text becomes a subtitle at that clip's original position. Silence between clips is preserved, and silent files make no transcription requests. Long continuous speech is divided into clips of approximately 12 seconds, preferring quieter cuts. Timings describe speech intervals; they are **not word alignment** and a clip can contain several sentences. Review and adjust the result as needed.
+
+The diarize model uses its own segment timestamps and server-side chunking instead of local VAD. Missing native timestamps produce an error rather than estimated text timings. Large uploads are split locally and returned segment times are shifted back to the source timeline.
+
+**Language hint** can be left empty for detection. For `gpt-transcribe`, multiple language codes can be separated with commas, for example `zh,en`. **Prompt** provides spelling or vocabulary context and is hidden for the diarize model. **More settings** contains timeout, additional headers and concurrent clip requests (default 2, adjustable from 1 to 4). Requests are restored to timeline order even when they finish out of order. Rate limits and temporary server errors are retried, and cancellation removes this run's temporary audio.
+
+These settings are separate from **OpenAI compatible STT**. On first use, an existing configuration for one of the listed GPT models is copied together with its endpoint and key. Compatible gateways must support the selected model and its request format; model availability depends on the endpoint. See the [OpenAI speech-to-text guide](https://developers.openai.com/api/docs/guides/speech-to-text).
+
+The Silero model is bundled and needs no separate download. Its license and the ONNX Runtime notices are included in `ThirdPartyLicenses`.
+
 ## Batch Mode
 
 Transcribe multiple video files at once:

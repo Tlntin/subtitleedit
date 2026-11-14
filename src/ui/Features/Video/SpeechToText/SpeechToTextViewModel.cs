@@ -15,6 +15,7 @@ using Nikse.SubtitleEdit.Features.Video.SpeechToText.Engines;
 using Nikse.SubtitleEdit.Features.Video.SpeechToText.EngineSettings;
 using Nikse.SubtitleEdit.Features.Video.SpeechToText.OpenRouter;
 using Nikse.SubtitleEdit.Features.Video.SpeechToText.OpenAiCompatible;
+using Nikse.SubtitleEdit.Features.Video.SpeechToText.GptTranscribe;
 using Nikse.SubtitleEdit.Logic;
 using Nikse.SubtitleEdit.Logic.Config;
 using Nikse.SubtitleEdit.Logic.Download;
@@ -114,6 +115,20 @@ public partial class SpeechToTextViewModel : ObservableObject
     [ObservableProperty] private string _engineDownloadHint;
 
     [ObservableProperty] private bool _isOpenAiCompatibleSttVisible;
+    [ObservableProperty] private bool _isGptTranscribeVisible;
+    [ObservableProperty] private string _gptTranscribeUrl = string.Empty;
+    [ObservableProperty] private string _gptTranscribeApiKey = string.Empty;
+    [ObservableProperty, NotifyPropertyChangedFor(nameof(GptTimingHint)), NotifyPropertyChangedFor(nameof(GptPromptAvailable))]
+    private GptTranscribeModel? _selectedGptTranscribeModel;
+    [ObservableProperty] private string _gptTranscribeLanguage = string.Empty;
+    [ObservableProperty] private string _gptTranscribePrompt = string.Empty;
+    [ObservableProperty] private string _gptTranscribeExtraHeaders = string.Empty;
+    [ObservableProperty] private int _gptTranscribeTimeoutSeconds;
+    [ObservableProperty] private int _gptTranscribeConcurrency;
+    public ObservableCollection<GptTranscribeModel> GptModels { get; } = new(GptTranscribeModels.All);
+    public bool GptPromptAvailable => SelectedGptTranscribeModel?.HasNativeTimestamps != true;
+    public string GptTimingHint => SelectedGptTranscribeModel?.HasNativeTimestamps == true
+        ? Se.Language.Video.AudioToText.GptNativeTimingHint : Se.Language.Video.AudioToText.GptVadTimingHint;
     [ObservableProperty] private bool _isAdvancedSettingsVisible = true;
     [ObservableProperty] private string? _openAiCompatibleSttUrl;
     [ObservableProperty] private string? _openAiCompatibleSttApiKey;
@@ -321,6 +336,7 @@ public partial class SpeechToTextViewModel : ObservableObject
 
         // Add OpenAI Compatible STT engine (available on all platforms)
         Engines.Add(new OpenAiCompatibleSttEngine());
+        Engines.Add(new GptTranscribeEngine());
 
         // Online STT services reachable on all platforms
         Engines.Add(new OpenRouterSttEngine());
@@ -414,6 +430,25 @@ public partial class SpeechToTextViewModel : ObservableObject
         OpenAiCompatibleSttStream = Se.Settings.Tools.OpenAiCompatibleSttStream;
         var savedFormat = Se.Settings.Tools.OpenAiCompatibleSttAudioFormat;
         OpenAiCompatibleSttAudioFormat = OpenAiCompatibleSttAudioFormats.Contains(savedFormat) ? savedFormat : "mp3";
+        var tools = Se.Settings.Tools;
+        GptTranscribeUrl = tools.GptTranscribeUrl;
+        GptTranscribeApiKey = tools.GptTranscribeApiKey;
+        SelectedGptTranscribeModel = GptTranscribeModels.Find(tools.GptTranscribeModel) ?? GptModels[0];
+        var existingGpt = GptTranscribeModels.Find(tools.OpenAiCompatibleSttModel);
+        var migrateGpt = !tools.GptTranscribeSettingsInitialized && string.IsNullOrWhiteSpace(tools.GptTranscribeApiKey) &&
+            existingGpt != null && !string.IsNullOrWhiteSpace(tools.OpenAiCompatibleSttApiKey);
+        if (migrateGpt)
+        {
+            // Migrate the endpoint/key pair together: never reuse a gateway key at another host.
+            GptTranscribeUrl = tools.OpenAiCompatibleSttUrl;
+            GptTranscribeApiKey = tools.OpenAiCompatibleSttApiKey;
+            SelectedGptTranscribeModel = existingGpt;
+        }
+        GptTranscribeLanguage = migrateGpt ? tools.OpenAiCompatibleSttLanguage : tools.GptTranscribeLanguage;
+        GptTranscribePrompt = migrateGpt ? tools.OpenAiCompatibleSttPrompt : tools.GptTranscribePrompt;
+        GptTranscribeExtraHeaders = migrateGpt ? tools.OpenAiCompatibleSttExtraHeaders : tools.GptTranscribeExtraHeaders;
+        GptTranscribeTimeoutSeconds = migrateGpt ? tools.OpenAiCompatibleSttTimeoutSeconds : tools.GptTranscribeTimeoutSeconds;
+        GptTranscribeConcurrency = tools.GptTranscribeConcurrency;
 
         OpenRouterSttApiKey = Se.Settings.Providers.OpenRouterApiKey;
         OpenRouterSttModel = Se.Settings.Tools.OpenRouterSttModel;
@@ -513,6 +548,15 @@ public partial class SpeechToTextViewModel : ObservableObject
         Se.Settings.Tools.OpenAiCompatibleSttExtraHeaders = OpenAiCompatibleSttExtraHeaders ?? string.Empty;
         Se.Settings.Tools.OpenAiCompatibleSttStream = OpenAiCompatibleSttStream;
         Se.Settings.Tools.OpenAiCompatibleSttAudioFormat = OpenAiCompatibleSttAudioFormat ?? "mp3";
+        Se.Settings.Tools.GptTranscribeSettingsInitialized = true;
+        Se.Settings.Tools.GptTranscribeUrl = GptTranscribeUrl;
+        Se.Settings.Tools.GptTranscribeApiKey = GptTranscribeApiKey;
+        Se.Settings.Tools.GptTranscribeModel = SelectedGptTranscribeModel?.Id ?? "gpt-transcribe";
+        Se.Settings.Tools.GptTranscribeLanguage = GptTranscribeLanguage;
+        Se.Settings.Tools.GptTranscribePrompt = GptTranscribePrompt;
+        Se.Settings.Tools.GptTranscribeExtraHeaders = GptTranscribeExtraHeaders;
+        Se.Settings.Tools.GptTranscribeTimeoutSeconds = GptTranscribeTimeoutSeconds;
+        Se.Settings.Tools.GptTranscribeConcurrency = GptTranscribeConcurrency;
 
         Se.Settings.Providers.OpenRouterApiKey = OpenRouterSttApiKey ?? string.Empty;
         Se.Settings.Tools.OpenRouterSttModel = OpenRouterSttModel ?? string.Empty;
@@ -1635,6 +1679,11 @@ public partial class SpeechToTextViewModel : ObservableObject
 
         var subtitle = new Subtitle();
         var segmentCount = 0;
+        IProgress<string>? requestProgress = engine is GptTranscribeEngine ? new Progress<string>(message =>
+        {
+            ProgressText = IsBatchMode ? GetProgressText() + " " + message : message;
+            LogToConsole(message + Environment.NewLine);
+        }) : null;
 
         try
         {
@@ -1669,11 +1718,11 @@ public partial class SpeechToTextViewModel : ObservableObject
             if ((audioSizeBytes > engine.UploadThresholdBytes || exceedsDurationCap) && _videoInfo.TotalSeconds > 0)
             {
                 LogToConsole($"Audio file is {audioSizeBytes / (1024 * 1024)} MB — splitting into chunks to stay under the upload cap");
-                await TranscribeInChunksAsync(service, engine, audioFileName, language, subtitle, segmentProgress, cancellationToken);
+                await TranscribeInChunksAsync(service, engine, audioFileName, language, subtitle, segmentProgress, cancellationToken, requestProgress);
             }
             else
             {
-                var response = await service.TranscribeAsync(audioFileName, language, null, segmentProgress, cancellationToken);
+                var response = await service.TranscribeAsync(audioFileName, language, requestProgress, segmentProgress, cancellationToken);
                 RememberDetectedLanguage(response);
                 IngestTranscriptionResponse(
                     response,
@@ -1959,7 +2008,8 @@ public partial class SpeechToTextViewModel : ObservableObject
         string? language,
         Subtitle subtitle,
         IProgress<OpenAiCompatibleSegment> segmentProgress,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        IProgress<string>? requestProgress = null)
     {
         var totalSeconds = _videoInfo.TotalSeconds;
         var fileSize = new FileInfo(audioFileName).Length;
@@ -2031,7 +2081,7 @@ public partial class SpeechToTextViewModel : ObservableObject
                 }
 
                 var chunkResponse = await service.TranscribeAsync(
-                    chunkPath, language, null, offsettingProgress, cancellationToken);
+                    chunkPath, language, requestProgress, offsettingProgress, cancellationToken);
 
                 RememberDetectedLanguage(chunkResponse);
                 IngestTranscriptionResponse(
@@ -2552,6 +2602,7 @@ public partial class SpeechToTextViewModel : ObservableObject
             DashScopeQwen3SttEngine => Se.Settings.Tools.DashScopeSttLanguage,
             GoogleCloudSttEngine => Se.Settings.Tools.GoogleCloudSttLanguage,
             OpenAiCompatibleSttEngine => Se.Settings.Tools.OpenAiCompatibleSttLanguage,
+            GptTranscribeEngine => Se.Settings.Tools.GptTranscribeLanguage.Split(',')[0].Trim(),
             _ => null,
         };
 
@@ -5817,6 +5868,7 @@ public partial class SpeechToTextViewModel : ObservableObject
         }
 
         IsOpenAiCompatibleSttVisible = engine is OpenAiCompatibleSttEngine;
+        IsGptTranscribeVisible = engine is GptTranscribeEngine;
         IsOpenRouterSttVisible = engine is OpenRouterSttEngine;
         IsDashScopeSttVisible = engine is DashScopeQwen3SttEngine;
         IsGoogleCloudSttVisible = engine is GoogleCloudSttEngine;

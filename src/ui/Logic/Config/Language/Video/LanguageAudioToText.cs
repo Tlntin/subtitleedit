@@ -18,6 +18,16 @@ public class LanguageAudioToText
     public string BatchRemainingX { get; set; } = "Entire batch remaining: {0}";
     public string BatchRemainingCalculating { get; set; } = "Entire batch remaining: estimating...";
     public string BatchElapsedX { get; set; } = "Batch elapsed: {0}";
+    public string GptVadTimingHint { get; set; } = "Local Silero VAD locates speech intervals; GPT transcribes each interval. Subtitle times follow the detected speech, including gaps. These are speech-interval times, not word alignment.";
+    public string GptNativeTimingHint { get; set; } = "Uses the model's native segment start/end times (diarized_json). Local VAD is not required for this model.";
+    public string GptDetectingSpeech { get; set; } = "Detecting speech with local VAD...";
+    public string GptTranscribingParts { get; set; } = "Transcribing speech intervals: {0}/{1}";
+    public string GptNoSpeech { get; set; } = "No speech detected; no audio was uploaded.";
+    public string GptMissingTimings { get; set; } = "The transcription endpoint did not return valid segment start/end times. Select a GPT model with local VAD, or an endpoint supporting diarized_json.";
+    public string GptConfigurationRequired { get; set; } = "Configure a valid transcription endpoint and select a supported GPT model.";
+    public string GptApiKeyRequired { get; set; } = "Enter the API key for the selected transcription endpoint.";
+    public string GptConcurrentRequests { get; set; } = "Concurrent transcription requests";
+    public string GptMoreSettings { get; set; } = "More settings";
     public string SubtitleFilesGenerated { get; set; }
     public string SubtitleFilesGeneratedX { get; set; }
     public string SubtitleFilesGeneratedXOfY { get; set; }

@@ -149,6 +149,15 @@ public class SeTools
     public bool OpenAiCompatibleSttAutoTranscribeOnAudioSelection { get; set; }
     public bool OpenAiCompatibleSttStream { get; set; }
     public string OpenAiCompatibleSttAudioFormat { get; set; } = "mp3";
+    public bool GptTranscribeSettingsInitialized { get; set; }
+    public string GptTranscribeUrl { get; set; } = "https://api.openai.com/v1/audio/transcriptions";
+    public string GptTranscribeApiKey { get; set; } = string.Empty;
+    public string GptTranscribeModel { get; set; } = "gpt-transcribe";
+    public string GptTranscribeLanguage { get; set; } = string.Empty;
+    public string GptTranscribePrompt { get; set; } = string.Empty;
+    public string GptTranscribeExtraHeaders { get; set; } = string.Empty;
+    public int GptTranscribeTimeoutSeconds { get; set; } = 300;
+    public int GptTranscribeConcurrency { get; set; } = 2;
 
     [Obsolete("Use Se.Settings.Providers.OpenRouterApiKey - kept only so old settings files can be migrated.")]
     public string OpenRouterSttApiKey { get; set; } = string.Empty;

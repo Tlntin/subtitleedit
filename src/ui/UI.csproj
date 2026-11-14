@@ -32,6 +32,7 @@
 		</PackageReference>
 		<PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.2" />
 		<PackageReference Include="FFmpeg.AutoGen" Version="9.0.1.1" />
+		<PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.32.0" />
 		<PackageReference Include="Google.Cloud.TextToSpeech.V1" Version="3.18.0" />
 		<PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="11.0.0-rc.3.26522.148" />
 		<PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="11.0.0-rc.3.26522.148" />
@@ -76,6 +77,9 @@
 		<AvaloniaResource Include="Assets\SevenZip\*.zip" />
 		<AvaloniaResource Include="Assets\SpeechToText\*.py" />
 		<AvaloniaResource Include="Assets\SpeechToText\*.txt" />
+		<EmbeddedResource Include="Assets\SpeechToText\silero_vad.onnx" LogicalName="SileroVad.onnx" />
+		<Content Include="Assets\SpeechToText\Silero-VAD-LICENSE.txt;Assets\SpeechToText\OnnxRuntime-LICENSE.txt;Assets\SpeechToText\OnnxRuntime-ThirdPartyNotices.txt"
+			Link="ThirdPartyLicenses\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
 		<AvaloniaResource Include="Assets\TextToSpeech\*.json" />
 		<Content Include="SE.ico" />
 	</ItemGroup>

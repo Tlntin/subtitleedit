@@ -1,0 +1,11 @@
+Silero VAD (MIT)
+Source: https://github.com/snakers4/silero-vad
+Pinned commit: 066409f3d9db45a30d21dfcbf9147826ffdd7052
+Model: src/silero_vad/data/silero_vad.onnx
+SHA-256: 1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3
+
+The 16 kHz inference path follows the upstream OnnxWrapper: 512 samples per
+frame, 64 samples of context, float state [2, 1, 128], scalar int64 sample rate.
+The model runs locally through the CPU ONNX Runtime. Audio is decoded once to
+16 kHz mono PCM and streamed through VAD; each resulting speech interval is
+uploaded independently and keeps its original source offset.

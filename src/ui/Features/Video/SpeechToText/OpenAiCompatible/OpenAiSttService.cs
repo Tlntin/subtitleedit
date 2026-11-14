@@ -10,6 +10,8 @@ using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
 using Nikse.SubtitleEdit.Features.Video.SpeechToText.Engines;
+using Nikse.SubtitleEdit.Features.Video.SpeechToText.GptTranscribe;
+using System.Linq;
 using Nikse.SubtitleEdit.Logic.Config;
 using Nikse.SubtitleEdit.UiLogic.Http;
 
@@ -79,7 +81,7 @@ public class OpenAiSttService : ISttTranscriber
             using var fileStream = File.OpenRead(audioFilePath);
             return await TranscribeAsync(fileStream, Path.GetFileName(audioFilePath), language, progress, segmentProgress, cancellationToken);
         }
-        catch (HttpRequestException exception) when (!_settings.Stream && IsVerboseJsonRejected(exception))
+        catch (HttpRequestException exception) when (_settings.RequestProfile == OpenAiSttRequestProfile.Compatible && !_settings.Stream && IsVerboseJsonRejected(exception))
         {
             // vLLM only does verbose_json for models with Whisper-style timestamp tokens and
             // answers 400 for any other model. Ask again for plain json - the text comes back
@@ -168,9 +170,17 @@ public class OpenAiSttService : ISttTranscriber
 
         // Add language if specified
         var languageToUse = language ?? _settings.Language;
+        var isGpt = _settings.RequestProfile != OpenAiSttRequestProfile.Compatible;
+        if (isGpt && (string.IsNullOrWhiteSpace(languageToUse) || languageToUse.Equals("auto", StringComparison.OrdinalIgnoreCase)))
+            languageToUse = null;
         if (!string.IsNullOrEmpty(languageToUse))
         {
-            content.Add(new StringContent(languageToUse), "language");
+            if (_settings.RequestProfile == OpenAiSttRequestProfile.GptTranscribe)
+            {
+                foreach (var code in languageToUse.Split(new[] { ',', ';', ' ' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                    content.Add(new StringContent(code), "languages[]");
+            }
+            else content.Add(new StringContent(isGpt ? languageToUse.Split(',')[0].Trim() : languageToUse), "language");
         }
 
         // Pick response_format based on streaming: OpenAI's streaming endpoint
@@ -178,9 +188,12 @@ public class OpenAiSttService : ISttTranscriber
         // unless `response_format=verbose_json` (issue #11146). Send the
         // granularity hints only with verbose_json — segments come through
         // the SSE `transcript.text.done` event anyway during streaming.
-        var useJson = _settings.Stream || forceJson;
-        var responseFormat = useJson ? "json" : "verbose_json";
+        var useJson = _settings.Stream || forceJson || isGpt;
+        var responseFormat = _settings.RequestProfile == OpenAiSttRequestProfile.GptDiarize
+            ? "diarized_json" : useJson ? "json" : "verbose_json";
         content.Add(new StringContent(responseFormat), "response_format");
+        if (_settings.RequestProfile == OpenAiSttRequestProfile.GptDiarize)
+            content.Add(new StringContent("auto"), "chunking_strategy");
 
         if (!useJson)
         {
@@ -195,13 +208,13 @@ public class OpenAiSttService : ISttTranscriber
         }
 
         // Add temperature if specified
-        if (_settings.Temperature > 0)
+        if (_settings.Temperature > 0 && _settings.RequestProfile != OpenAiSttRequestProfile.GptDiarize)
         {
             content.Add(new StringContent(_settings.Temperature.ToString("F2", CultureInfo.InvariantCulture)), "temperature");
         }
 
         // Add prompt if specified
-        if (!string.IsNullOrEmpty(_settings.Prompt))
+        if (!string.IsNullOrEmpty(_settings.Prompt) && _settings.RequestProfile != OpenAiSttRequestProfile.GptDiarize)
         {
             content.Add(new StringContent(_settings.Prompt), "prompt");
         }
@@ -258,11 +271,14 @@ public class OpenAiSttService : ISttTranscriber
             // Carry the status code on the exception: the caller turns a 4xx that
             // complains about "model" into a hint about the Model field, and
             // sniffing the number back out of the message is fragile (issue #12877).
-            throw new HttpRequestException(
+            var exception = new HttpRequestException(
                 $"STT request failed with status {statusCode} ({response.StatusCode}) " +
                 $"calling {safeEndpoint}. Response: {errorContent}",
                 null,
                 response.StatusCode);
+            if (response.Headers.RetryAfter?.Delta is { } retryAfter)
+                exception.Data["RetryAfterSeconds"] = retryAfter.TotalSeconds;
+            throw exception;
         }
 
         // Check if streaming (SSE)
@@ -274,6 +290,7 @@ public class OpenAiSttService : ISttTranscriber
 
         // Non-streaming response
         var jsonResponse = await response.Content.ReadAsStringAsync(cancellationToken);
+        if (isGpt) return GptTranscribeResponseParser.Parse(jsonResponse, _settings.RequestProfile == OpenAiSttRequestProfile.GptDiarize);
         return ParseJsonResponse(jsonResponse);
     }
 
@@ -809,8 +826,11 @@ public class OpenAiSttService : ISttTranscriber
     }
 }
 
+public enum OpenAiSttRequestProfile { Compatible, GptTranscribe, Gpt4o, GptDiarize }
+
 public class OpenAiCompatibleSettings
 {
+    public OpenAiSttRequestProfile RequestProfile { get; set; }
     public string EndpointUrl { get; set; } = string.Empty;
     public string ApiKey { get; set; } = string.Empty;
     public string Model { get; set; } = string.Empty;
