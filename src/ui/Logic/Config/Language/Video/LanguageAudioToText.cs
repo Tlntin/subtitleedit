@@ -28,6 +28,9 @@ public class LanguageAudioToText
     public string GptAlignmentEnabled { get; set; } = "Using installed Qwen3 forced alignment for sentence timestamps.";
     public string GptAlignmentUnavailable { get; set; } = "Local alignment is off or no installed Qwen3 aligner was found. Keeping chunk-level times; sentence alignment is not applied.";
     public string GptAligningChunk { get; set; } = "Aligning sentence timestamps: chunk {0}/{1}...";
+    public string GptRequestCompleted { get; set; } = "Chunk {0}/{1}: API request completed in {2:0.00} s (including retries).";
+    public string GptAlignmentCompleted { get; set; } = "Chunk {0}/{1}: sentence alignment completed in {2:0.00} s.";
+    public string GptProcessingSpeed { get; set; } = "Elapsed: {0:0.0} s; audio completed: {1:0.0} s; overall speed: {2:0.0}x.";
     public string GptAlignmentFailed { get; set; } = "Local alignment failed for chunk {0}; keeping its full text with chunk-level times.";
     public string GptEmptyChunk { get; set; } = "Audio {0:0.000}–{1:0.000} s: endpoint returned empty text. Check this interval.";
     public string GptUseLocalAlignment { get; set; } = "Use installed Qwen3 aligner for sentence times (slower)";

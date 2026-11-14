@@ -5,10 +5,12 @@ using Nikse.SubtitleEdit.Features.Files.ImportPlainText;
 using Nikse.SubtitleEdit.Logic.Config;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
+using System.Runtime.ExceptionServices;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -48,6 +50,7 @@ internal sealed class GptTranscribeService : ISttTranscriber
 
         var folder = Directory.CreateTempSubdirectory("se-gpt-vad-").FullName;
         var pcm = Path.Combine(folder, "audio.pcm");
+        var elapsed = Stopwatch.StartNew();
         try
         {
             progress?.Report(Se.Language.Video.AudioToText.GptDetectingSpeech);
@@ -72,69 +75,115 @@ internal sealed class GptTranscribeService : ISttTranscriber
             var intervals = GptContextChunkPlanner.Plan(speech, result.Duration ?? 0);
             progress?.Report(string.Format(Se.Language.Video.AudioToText.GptContextChunks, intervals.Count));
             progress?.Report(_aligner != null ? Se.Language.Video.AudioToText.GptAlignmentEnabled : Se.Language.Video.AudioToText.GptAlignmentUnavailable);
+            using var pipeline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            using var requestGate = new SemaphoreSlim(_concurrency, _concurrency);
             using var alignmentGate = new SemaphoreSlim(1, 1);
-
-            for (var first = 0; first < intervals.Count; first += _concurrency)
+            ExceptionDispatchInfo? failure = null;
+            var pending = new Queue<Task<ChunkResult>>();
+            var next = 0;
+            try
             {
-                cancellationToken.ThrowIfCancellationRequested();
-                var batch = intervals.Skip(first).Take(_concurrency).Select(async (interval, i) =>
+                for (var completed = 0; completed < intervals.Count; completed++)
                 {
-                    var clip = Path.Combine(folder, $"clip-{first + i}.wav");
-                    try
-                    {
-                        GptAudioProcessor.WriteClip(pcm, clip, interval, cancellationToken);
-                        var hasSignal = GptAudioProcessor.HasSignal(pcm, interval, cancellationToken);
-                        if (hasSignal) progress?.Report(string.Format(Se.Language.Video.AudioToText.GptTranscribingChunk,
-                            first + i + 1, intervals.Count, interval.Start, interval.End));
-                        var response = hasSignal ? await RequestAsync(clip, language, cancellationToken).ConfigureAwait(false)
-                            : new OpenAiCompatibleSttResponse();
-                        IReadOnlyList<OpenAiCompatibleSegment>? aligned = null;
-                        if (!string.IsNullOrWhiteSpace(response.Text) && _aligner != null)
-                        {
-                            await alignmentGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-                            try
-                            {
-                                progress?.Report(string.Format(Se.Language.Video.AudioToText.GptAligningChunk, first + i + 1, intervals.Count));
-                                aligned = await _aligner.AlignAsync(clip, response.Text, interval.End - interval.Start, cancellationToken).ConfigureAwait(false);
-                            }
-                            catch (Exception ex) when (ex is ForcedAlignerException or InvalidDataException or IOException)
-                            {
-                                progress?.Report(string.Format(Se.Language.Video.AudioToText.GptAlignmentFailed, first + i + 1));
-                            }
-                            finally { alignmentGate.Release(); }
-                        }
-                        return (interval, response, aligned, hasSignal);
-                    }
-                    finally { if (File.Exists(clip)) File.Delete(clip); }
-                }).ToArray();
+                    cancellationToken.ThrowIfCancellationRequested();
+                    // Keep HTTP workers busy while the single GPU aligner runs. Limit the
+                    // look-ahead so a slow early chunk cannot accumulate an entire movie's clips.
+                    while (next < intervals.Count && pending.Count < _concurrency * 2)
+                        pending.Enqueue(ProcessChunkAsync(next++));
 
-                // Emit in timeline order even when a later request finishes first. The main
-                // editor uses segment end times for live progress and batch ETA.
-                var responses = await Task.WhenAll(batch).ConfigureAwait(false);
-                foreach (var (interval, response, aligned, hasSignal) in responses)
-                {
+                    // Publish on the original timeline even if requests/alignment finish out of order.
+                    var (interval, response, aligned, hasSignal) = await pending.Dequeue().ConfigureAwait(false);
                     if (!string.IsNullOrWhiteSpace(response.Language)) result.Language ??= response.Language;
                     var text = response.Text.Trim();
                     if (text.Length == 0)
                     {
                         progress?.Report(string.Format(hasSignal ? Se.Language.Video.AudioToText.GptEmptyChunk
                             : Se.Language.Video.AudioToText.GptSilentChunk, interval.Start, interval.End));
-                        continue;
                     }
-                    var captions = aligned ?? new[] { new OpenAiCompatibleSegment { Start = 0, End = interval.End - interval.Start, Text = text } };
-                    if (aligned == null) result.HasChunkLevelTimings = true;
-                    foreach (var caption in captions)
+                    else
                     {
-                        var segment = new OpenAiCompatibleSegment
+                        var captions = aligned ?? new[] { new OpenAiCompatibleSegment { Start = 0, End = interval.End - interval.Start, Text = text } };
+                        if (aligned == null) result.HasChunkLevelTimings = true;
+                        foreach (var caption in captions)
                         {
-                            Id = result.Segments.Count, Start = interval.Start + caption.Start, End = interval.Start + caption.End, Text = caption.Text,
-                        };
-                        result.Segments.Add(segment);
-                        segmentProgress?.Report(segment);
+                            var segment = new OpenAiCompatibleSegment
+                            {
+                                Id = result.Segments.Count, Start = interval.Start + caption.Start, End = interval.Start + caption.End, Text = caption.Text,
+                            };
+                            result.Segments.Add(segment);
+                            segmentProgress?.Report(segment);
+                        }
                     }
+                    progress?.Report(string.Format(Se.Language.Video.AudioToText.GptTranscribingParts, completed + 1, intervals.Count));
+                    progress?.Report(string.Format(Se.Language.Video.AudioToText.GptProcessingSpeed,
+                        elapsed.Elapsed.TotalSeconds, interval.End, interval.End / Math.Max(0.001, elapsed.Elapsed.TotalSeconds)));
                 }
-                progress?.Report(string.Format(Se.Language.Video.AudioToText.GptTranscribingParts,
-                    Math.Min(first + _concurrency, intervals.Count), intervals.Count));
+            }
+            catch
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                failure?.Throw(); // Preserve the actual HTTP error when it cancels another worker.
+                throw;
+            }
+            finally
+            {
+                pipeline.Cancel();
+                // Every worker must exit before temporary files and semaphores are removed.
+                try { await Task.WhenAll(pending).ConfigureAwait(false); } catch { }
+            }
+
+            async Task<ChunkResult> ProcessChunkAsync(int index)
+            {
+                var token = pipeline.Token;
+                var interval = intervals[index];
+                var clip = Path.Combine(folder, $"clip-{index}.wav");
+                try
+                {
+                    OpenAiCompatibleSttResponse response;
+                    bool hasSignal;
+                    await requestGate.WaitAsync(token).ConfigureAwait(false);
+                    try
+                    {
+                        GptAudioProcessor.WriteClip(pcm, clip, interval, token);
+                        hasSignal = GptAudioProcessor.HasSignal(pcm, interval, token);
+                        if (hasSignal) progress?.Report(string.Format(Se.Language.Video.AudioToText.GptTranscribingChunk,
+                            index + 1, intervals.Count, interval.Start, interval.End));
+                        var requestTime = Stopwatch.StartNew();
+                        response = hasSignal ? await RequestAsync(clip, language, token).ConfigureAwait(false)
+                            : new OpenAiCompatibleSttResponse();
+                        if (hasSignal) progress?.Report(string.Format(Se.Language.Video.AudioToText.GptRequestCompleted,
+                            index + 1, intervals.Count, requestTime.Elapsed.TotalSeconds));
+                    }
+                    finally { requestGate.Release(); }
+
+                    IReadOnlyList<OpenAiCompatibleSegment>? aligned = null;
+                    if (!string.IsNullOrWhiteSpace(response.Text) && _aligner != null)
+                    {
+                        await alignmentGate.WaitAsync(token).ConfigureAwait(false);
+                        var alignmentTime = Stopwatch.StartNew();
+                        try
+                        {
+                            progress?.Report(string.Format(Se.Language.Video.AudioToText.GptAligningChunk, index + 1, intervals.Count));
+                            aligned = await _aligner.AlignAsync(clip, response.Text, interval.End - interval.Start, token).ConfigureAwait(false);
+                            progress?.Report(string.Format(Se.Language.Video.AudioToText.GptAlignmentCompleted,
+                                index + 1, intervals.Count, alignmentTime.Elapsed.TotalSeconds));
+                        }
+                        catch (Exception ex) when (ex is ForcedAlignerException or InvalidDataException or IOException)
+                        {
+                            progress?.Report(string.Format(Se.Language.Video.AudioToText.GptAlignmentFailed, index + 1));
+                        }
+                        finally { alignmentGate.Release(); }
+                    }
+                    return new(interval, response, aligned, hasSignal);
+                }
+                catch (Exception ex)
+                {
+                    if (ex is not OperationCanceledException || !pipeline.IsCancellationRequested)
+                        Interlocked.CompareExchange(ref failure, ExceptionDispatchInfo.Capture(ex), null);
+                    pipeline.Cancel();
+                    throw;
+                }
+                finally { if (File.Exists(clip)) File.Delete(clip); }
             }
 
             result.Text = string.Join(" ", result.Segments.Select(s => s.Text));
@@ -150,6 +199,9 @@ internal sealed class GptTranscribeService : ISttTranscriber
             try { Directory.Delete(folder); } catch (IOException) { }
         }
     }
+
+    private sealed record ChunkResult(SpeechInterval Interval, OpenAiCompatibleSttResponse Response,
+        IReadOnlyList<OpenAiCompatibleSegment>? Aligned, bool HasSignal);
 
     private async Task<OpenAiCompatibleSttResponse> RequestAsync(string file, string? language, CancellationToken token)
     {

@@ -28,6 +28,14 @@ public class GptTranscribeTests : IDisposable
         Content = new StringContent(value, Encoding.UTF8, "application/json"),
     };
 
+    [Fact]
+    public void ProcessingSpeed_ShowsActualDecimalMultiplier()
+    {
+        var message = string.Format(System.Globalization.CultureInfo.InvariantCulture,
+            new Nikse.SubtitleEdit.Logic.Config.Language.LanguageAudioToText().GptProcessingSpeed, 42.4, 180, 180 / 42.4);
+        Assert.Contains("4.2x", message);
+    }
+
     private static async Task<Dictionary<string, List<string>>> Fields(HttpRequestMessage request)
     {
         var form = Assert.IsType<MultipartFormDataContent>(request.Content);
@@ -265,6 +273,93 @@ public class GptTranscribeTests : IDisposable
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => task);
         Assert.Equal(2, handler.Calls);
         Assert.False(Directory.Exists(Path.GetDirectoryName(audio.PcmPath)!));
+    }
+
+    [Fact]
+    public async Task Pipeline_StartsMoreRequestsWhileEarlierHttpAndAlignmentAreBlocked_WithBoundedLookAhead()
+    {
+        var token = TestContext.Current.CancellationToken;
+        var releaseFirstRequest = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseAlignment = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var thirdRequest = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var active = 0;
+        var maximum = 0;
+        using var handler = new Handler(async (request, ct) =>
+        {
+            var file = Assert.IsType<MultipartFormDataContent>(request.Content)
+                .Single(p => p.Headers.ContentDisposition!.Name!.Trim('"') == "file");
+            var index = int.Parse(Path.GetFileNameWithoutExtension(file.Headers.ContentDisposition!.FileName!.Trim('"'))[5..]);
+            var current = Interlocked.Increment(ref active);
+            int previous;
+            do { previous = maximum; } while (current > previous && Interlocked.CompareExchange(ref maximum, current, previous) != previous);
+            try
+            {
+                if (index == 0) await releaseFirstRequest.Task.WaitAsync(ct);
+                if (index == 2) thirdRequest.TrySetResult();
+                return Json($$"""{"text":"Chunk {{index}}."}""");
+            }
+            finally { Interlocked.Decrement(ref active); }
+        });
+        using var http = new HttpClient(handler);
+        var audio = new FakeAudio([], duration: 144);
+        var seen = new List<OpenAiCompatibleSegment>();
+        var task = new GptTranscribeService(Settings(), 2, http, audio, new BlockingAligner(releaseAlignment.Task))
+            .TranscribeAsync(AudioFile(), segmentProgress: new InlineProgress<OpenAiCompatibleSegment>(seen.Add), cancellationToken: token);
+        try
+        {
+            // This can only happen before releasing either earlier stage if HTTP has
+            // its own slots rather than a barrier around each pair of complete chunks.
+            await thirdRequest.Task.WaitAsync(TimeSpan.FromSeconds(5), token);
+            Assert.InRange(handler.Calls, 3, 4);
+            Assert.InRange(maximum, 1, 2);
+            Assert.Empty(seen);
+        }
+        finally
+        {
+            releaseFirstRequest.TrySetResult();
+            releaseAlignment.TrySetResult();
+        }
+        var result = await task;
+        Assert.Equal(6, result.Segments!.Count);
+        Assert.Equal(Enumerable.Range(0, 6).Select(i => $"Chunk {i}."), seen.Select(s => s.Text));
+        Assert.Equal(Enumerable.Range(0, 6).Select(i => i * 24.0), seen.Select(s => s.Start));
+        Assert.False(Directory.Exists(Path.GetDirectoryName(audio.PcmPath)!));
+    }
+
+    [Fact]
+    public async Task Pipeline_HttpFailureCancelsOtherWorkers_PreservesOriginalError_AndAwaitsCleanup()
+    {
+        var secondEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var secondExited = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var count = 0;
+        using var handler = new Handler(async (_, token) =>
+        {
+            if (Interlocked.Increment(ref count) == 1)
+            {
+                await secondEntered.Task.WaitAsync(token);
+                return new HttpResponseMessage(HttpStatusCode.Unauthorized) { Content = new StringContent("unauthorized") };
+            }
+            secondEntered.TrySetResult();
+            try { await Task.Delay(Timeout.Infinite, token); }
+            finally { secondExited.TrySetResult(); }
+            return Json("{}");
+        });
+        using var http = new HttpClient(handler);
+        var audio = new FakeAudio([], duration: 144);
+        var ex = await Assert.ThrowsAsync<HttpRequestException>(() => Service(Settings(), 2, http, audio)
+            .TranscribeAsync(AudioFile(), cancellationToken: TestContext.Current.CancellationToken));
+        Assert.Equal(HttpStatusCode.Unauthorized, ex.StatusCode);
+        Assert.True(secondExited.Task.IsCompletedSuccessfully);
+        Assert.False(Directory.Exists(Path.GetDirectoryName(audio.PcmPath)!));
+    }
+
+    private sealed class BlockingAligner(Task release) : IGptSubtitleAligner
+    {
+        public async Task<IReadOnlyList<OpenAiCompatibleSegment>> AlignAsync(string clip, string text, double duration, CancellationToken token)
+        {
+            await release.WaitAsync(token);
+            return [new() { Start = 0, End = duration, Text = text }];
+        }
     }
 
     private sealed class FakeAligner(bool fail) : IGptSubtitleAligner
