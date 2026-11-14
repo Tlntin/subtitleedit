@@ -153,6 +153,8 @@ Use the **Skip files with existing subtitles...** button above the batch list to
 
 During a batch, **Current file remaining** and **Entire batch remaining** are separate. The batch estimate includes all queued media durations and uses completed files as a speed sample while the next file has no progress yet, including audio extraction. Before the first usable sample it displays **estimating...**. Elapsed time covers the whole batch and estimates can show more than 24 hours.
 
+If a completed subtitle cannot be saved (for example, an SMB share rejects authentication or write access), the batch pauses and makes a local recovery copy under the user's local application data folder, `Subtitle Edit/SpeechToTextRecovery`. The dialog shows the destination error and recovery path. **Retry saving** writes the completed result again without another transcription. **Choose output folder...** saves it in another directory and uses that directory for the remaining files. **Stop batch** restores the controls and retains the recovery copy and engine temporary files until the window closes. A failed recovery copy is reported explicitly, and the completed subtitle also remains in memory for the session. Existing subtitles are never overwritten by a failed or racing write.
+
 ## Advanced Settings
 
 Click the **Advanced** button to configure custom command-line arguments for the Whisper engine:

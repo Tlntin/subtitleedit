@@ -28,6 +28,15 @@ public class LanguageAudioToText
     public string GptApiKeyRequired { get; set; } = "Enter the API key for the selected transcription endpoint.";
     public string GptConcurrentRequests { get; set; } = "Concurrent transcription requests";
     public string GptMoreSettings { get; set; } = "More settings";
+    public string BatchSavingSubtitle { get; set; } = "Saving subtitle...";
+    public string BatchSaveFailedTitle { get; set; } = "Unable to save subtitle";
+    public string BatchSaveFailedMessage { get; set; } = "Transcription finished, but the subtitle could not be saved to:\n{0}\n\n{1}\n\nFor an SMB share, reconnect and check write access, then retry. Choosing another folder also changes the output folder for the remaining files.";
+    public string BatchSaveRecoveryMessage { get; set; } = "A local recovery copy of the completed subtitle is saved at:\n{0}\n\nRetrying or changing folders saves this result without transcribing it again.";
+    public string BatchSaveRecoveryFailedMessage { get; set; } = "The local recovery copy could not be saved: {0}\n\nThe result and engine temporary files are still retained in this session. Retry or choose a writable folder before closing.";
+    public string BatchSaveRetry { get; set; } = "Retry saving";
+    public string BatchSaveChooseFolder { get; set; } = "Choose output folder...";
+    public string BatchSaveStop { get; set; } = "Stop batch";
+    public string BatchSaveStopped { get; set; } = "Stopped: subtitle not saved to destination";
     public string SubtitleFilesGenerated { get; set; }
     public string SubtitleFilesGeneratedX { get; set; }
     public string SubtitleFilesGeneratedXOfY { get; set; }

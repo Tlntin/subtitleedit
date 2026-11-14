@@ -54,6 +54,14 @@ public class SpeechToTextSubtitleFileNameTests : IDisposable
     }
 
     [Fact]
+    public void ChosenOutputFolder_IsUsedForOrdinaryMedia()
+    {
+        var destination = Path.Combine(_folder, "local-output");
+        Assert.Equal(Path.Combine(destination, "My Video.srt"),
+            SpeechToTextViewModel.GetSubtitleFileName(Video("My Video.mkv"), null, destination));
+    }
+
+    [Fact]
     public void ExistingFileWithLanguageCode_CounterKeepsLanguageTokenBeforeExtension()
     {
         // "My Video.fr_2.srt" would break media player language detection - the

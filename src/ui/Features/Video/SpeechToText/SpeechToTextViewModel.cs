@@ -2235,21 +2235,107 @@ public partial class SpeechToTextViewModel : ObservableObject
         }
     }
 
+    private bool _completingBatchItem;
+
     private void StartNext(Subtitle? transcribedSubtitle)
+    {
+        // Timer callbacks must not discard a faulted Task. Keep completion on the UI thread
+        // and always restore controls if an unexpected failure escapes the save workflow.
+        Dispatcher.UIThread.Post(async () =>
+        {
+            if (_completingBatchItem) return;
+            _completingBatchItem = true;
+            try { await CompleteBatchItemAsync(transcribedSubtitle); }
+            catch (Exception ex)
+            {
+                StopBatchAfterSaveFailure();
+                Se.WriteToolsLog($"Speech-to-text batch completion failed: {ex}", true);
+                if (Window != null && !_windowClosing)
+                    await MessageBox.Show(Window, Se.Language.General.Error, ex.Message);
+            }
+            finally { _completingBatchItem = false; }
+        });
+    }
+
+    private void StopBatchAfterSaveFailure()
+    {
+        _abort = true;
+        if (_windowClosing) return;
+        _timerWhisper.Stop();
+        _timerAudioExtract.Stop();
+        IsTranscribeEnabled = true;
+        HideProgressBar();
+        EstimatedText = string.Empty;
+        BatchEstimatedText = string.Empty;
+    }
+
+    internal async Task<bool> SaveBatchItemAsync(SpeechToTextJobItem item, Subtitle subtitle,
+        SpeechToTextBatchSaveRecovery? saver = null,
+        Func<BatchSaveFailure, Task<BatchSaveAction>>? ask = null, Func<Task<string>>? chooseFolder = null,
+        string? recoveryFolder = null)
+    {
+        var languageCode = AddLanguageCodeToFileName ? GetFileNameLanguageCode(subtitle) : null;
+        subtitle.Renumber();
+        var text = new SubRip().ToText(subtitle, string.Empty);
+        ProgressText = Se.Language.Video.AudioToText.BatchSavingSubtitle;
+        recoveryFolder ??= Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "Subtitle Edit", "SpeechToTextRecovery");
+        var result = await (saver ?? new SpeechToTextBatchSaveRecovery()).SaveAsync(text,
+            folder => GetSubtitleFileName(item.InputVideoFileName, languageCode, folder),
+            _batchOutputFolder, recoveryFolder, ask ?? AskBatchSaveFailureAsync,
+            chooseFolder ?? (() => _folderHelper.PickFolderAsync(Window!, Se.Language.General.PickOutputFolder)));
+        if (result.SavedFile == null)
+        {
+            TranscribedSubtitle = new Subtitle(subtitle);
+            item.Status = Se.Language.Video.AudioToText.BatchSaveStopped;
+            item.OutputSubtitleFileName = result.RecoveryFile ?? string.Empty;
+            if (result.RecoveryFile != null) LastBatchSubtitleFileName = result.RecoveryFile;
+            StopBatchAfterSaveFailure();
+            ProgressText = item.Status;
+            return false; // Keep engine output and temporary audio too, including if the backup failed.
+        }
+        _batchOutputFolder = result.OutputFolder;
+        item.OutputSubtitleFileName = result.SavedFile;
+        LastBatchSubtitleFileName = result.SavedFile;
+        item.Status = Se.Language.General.Converted;
+        if (_abort || _windowClosing)
+        {
+            StopBatchAfterSaveFailure();
+            return false;
+        }
+        return true;
+    }
+
+    private async Task<BatchSaveAction> AskBatchSaveFailureAsync(BatchSaveFailure failure)
+    {
+        Se.WriteToolsLog($"Unable to save batch subtitle '{failure.Target}': {failure.Error}. Recovery: {failure.RecoveryFile}. Recovery error: {failure.RecoveryError}", true);
+        if (_abort || _windowClosing || Window == null) return BatchSaveAction.Stop;
+        var language = Se.Language.Video.AudioToText;
+        var message = string.Format(language.BatchSaveFailedMessage, failure.Target, failure.Error.Message);
+        message += Environment.NewLine + Environment.NewLine + (failure.RecoveryFile != null
+            ? string.Format(language.BatchSaveRecoveryMessage, failure.RecoveryFile)
+            : string.Format(language.BatchSaveRecoveryFailedMessage, failure.RecoveryError?.Message));
+        var answer = await MessageBox.Show(Window, language.BatchSaveFailedTitle, message,
+            MessageBoxButtons.Custom1, MessageBoxIcon.Warning,
+            language.BatchSaveRetry, language.BatchSaveChooseFolder, language.BatchSaveStop);
+        return answer switch
+        {
+            MessageBoxResult.Custom1 => BatchSaveAction.Retry,
+            MessageBoxResult.Custom2 => BatchSaveAction.ChooseFolder,
+            _ => BatchSaveAction.Stop,
+        };
+    }
+
+    private async Task CompleteBatchItemAsync(Subtitle? transcribedSubtitle)
     {
         var currentItem = _jobItems[_batchIndex];
         ApplyBatchItemResult(currentItem, transcribedSubtitle);
-        _batchProgress?.CompleteItem(currentItem.Status == Se.Language.General.Converted, DateTime.UtcNow);
         if (currentItem.Status == Se.Language.General.Converted)
         {
-            var languageCode = AddLanguageCodeToFileName ? GetFileNameLanguageCode(transcribedSubtitle) : null;
-            var subtitleFileName = GetSubtitleFileName(currentItem.InputVideoFileName, languageCode, _batchOutputFolder);
-            var format = new SubRip();
-            var text = format.ToText(transcribedSubtitle, string.Empty);
-            File.WriteAllText(subtitleFileName, text);
-            LastBatchSubtitleFileName = subtitleFileName;
-            currentItem.OutputSubtitleFileName = subtitleFileName;
+            currentItem.Status = Se.Language.Video.AudioToText.BatchSavingSubtitle;
+            if (!await SaveBatchItemAsync(currentItem, transcribedSubtitle!)) return;
         }
+        _batchProgress?.CompleteItem(currentItem.Status == Se.Language.General.Converted, DateTime.UtcNow);
 
         // Delete temp files from the just-finished item so disk usage doesn't grow across long batches
         DeleteTempFiles();
@@ -2306,32 +2392,29 @@ public partial class SpeechToTextViewModel : ObservableObject
 
         var failed = _jobItems.Count(p => p.Status != Se.Language.General.Converted);
 
-        Dispatcher.UIThread.Invoke<Task>(async () =>
+        _timerWhisper.Stop();
+        await Task.Delay(250);
+        HideProgressBar();
+        ProgressText = string.Empty;
+        EstimatedText = string.Empty;
+        ElapsedText = string.Empty;
+        BatchEstimatedText = string.Empty;
+
+        if (_audioClips != null)
         {
-            _timerWhisper.Stop();
-            await Task.Delay(250);
-            HideProgressBar();
-            ProgressText = string.Empty;
-            EstimatedText = string.Empty;
-            ElapsedText = string.Empty;
-            BatchEstimatedText = string.Empty;
+            await FinishAudioClips();
+            return;
+        }
 
-            if (_audioClips != null)
-            {
-                await FinishAudioClips();
-                return;
-            }
+        await ShowBatchResultAsync();
 
-            await ShowBatchResultAsync();
+        IsTranscribeEnabled = true;
 
-            IsTranscribeEnabled = true;
-
-            if (failed == 0)
-            {
-                OkPressed = true;
-                Window?.Close();
-            }
-        });
+        if (failed == 0)
+        {
+            OkPressed = true;
+            Window?.Close();
+        }
     }
 
     private int CountTranscribedAudioClips() => ResultAudioClips.Count(p => p.Transcription.Paragraphs.Count > 0);
@@ -2424,9 +2507,8 @@ public partial class SpeechToTextViewModel : ObservableObject
 
     public static string GetSubtitleFileName(string videoFileName, string? languageCode, string? outputFolder = null)
     {
-        // For document portal video paths the output goes to the folder picked in
-        // Transcribe() - only the granted video file name itself can exist in such a folder.
-        var path = !string.IsNullOrEmpty(outputFolder) && DocumentPortal.IsPortalPath(videoFileName)
+        // A recovery folder applies to ordinary videos and SMB shares too, not just portal grants.
+        var path = !string.IsNullOrEmpty(outputFolder)
             ? outputFolder
             : Path.GetDirectoryName(videoFileName);
         var fileName = Path.GetFileNameWithoutExtension(videoFileName);
