@@ -137,6 +137,8 @@ These settings are separate from **OpenAI compatible STT**. On first use, an exi
 
 The Silero model is bundled and needs no separate download. Its license and the ONNX Runtime notices are included in `ThirdPartyLicenses`.
 
+**Test connection**, below the model selector, sends about four seconds of bundled synthetic English speech to the currently entered endpoint, key and model. It makes one transcription request, which may incur a small API charge, and waits up to 30 seconds. No selected media is uploaded and testing does not save the edited settings or start the batch. The result reports success, authentication/model/endpoint errors, quota/rate limits, network failures, invalid responses or timeout. Use **Cancel** to stop the test. A successful test requires valid transcription text; Diarize also requires native segment timestamps. Editing the endpoint, key, headers or model clears the previous result.
+
 ## Batch Mode
 
 Transcribe multiple video files at once:

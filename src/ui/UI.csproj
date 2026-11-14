@@ -78,6 +78,7 @@
 		<AvaloniaResource Include="Assets\SpeechToText\*.py" />
 		<AvaloniaResource Include="Assets\SpeechToText\*.txt" />
 		<EmbeddedResource Include="Assets\SpeechToText\silero_vad.onnx" LogicalName="SileroVad.onnx" />
+		<EmbeddedResource Include="Assets\SpeechToText\connection-test.wav" LogicalName="SpeechToTextConnectionTest.wav" />
 		<Content Include="Assets\SpeechToText\Silero-VAD-LICENSE.txt;Assets\SpeechToText\OnnxRuntime-LICENSE.txt;Assets\SpeechToText\OnnxRuntime-ThirdPartyNotices.txt"
 			Link="ThirdPartyLicenses\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
 		<AvaloniaResource Include="Assets\TextToSpeech\*.json" />

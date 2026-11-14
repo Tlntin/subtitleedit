@@ -148,7 +148,7 @@ public class SpeechToTextWindow : Window
     private static Border MakeEngineSection(SpeechToTextViewModel vm)
     {
         var comboEngine = UiUtil.MakeComboBox(vm.Engines, vm, nameof(vm.SelectedEngine))
-            .BindIsEnabled(vm, nameof(vm.IsTranscribeEnabled))
+            .BindIsEnabled(vm, nameof(vm.CanEditBatch))
             .WithAccessibleName(Se.Language.General.Engine);
         comboEngine.HorizontalAlignment = HorizontalAlignment.Stretch;
         comboEngine.ItemTemplate = MakeEngineItemTemplate();
@@ -455,16 +455,32 @@ public class SpeechToTextWindow : Window
             OnlineNumber(vm, nameof(vm.GptTranscribeConcurrency), 1, 4, "F0")));
         advanced.Children.Add(OnlineRow(Se.Language.General.OpenAiCompatibleSttExtraHeaders,
             OnlineText(vm, nameof(vm.GptTranscribeExtraHeaders))));
-        return new Control[]
+        var fields = new StackPanel { Spacing = 10 };
+        foreach (var control in new Control[]
         {
             OnlineRow(Se.Language.General.OpenAiCompatibleSttEndpoint, OnlineText(vm, nameof(vm.GptTranscribeUrl))),
             OnlineRow(Se.Language.General.OpenAiCompatibleSttApiKey, OnlineApiKey(vm, nameof(vm.GptTranscribeApiKey))),
             OnlineRow(Se.Language.General.Model, models),
-            timingHint,
-            OnlineRow(Se.Language.General.OpenAiCompatibleSttLanguage, OnlineText(vm, nameof(vm.GptTranscribeLanguage))),
-            prompt,
-            new Expander { Header = Se.Language.Video.AudioToText.GptMoreSettings, Content = advanced, IsExpanded = false },
-        };
+        }) fields.Children.Add(control);
+        EditorChrome.EnabledBy(fields, vm, nameof(vm.IsGptConfigurationEnabled));
+        var more = new StackPanel { Spacing = 10 };
+        more.Children.Add(OnlineRow(Se.Language.General.OpenAiCompatibleSttLanguage, OnlineText(vm, nameof(vm.GptTranscribeLanguage))));
+        more.Children.Add(prompt);
+        more.Children.Add(new Expander { Header = Se.Language.Video.AudioToText.GptMoreSettings, Content = advanced, IsExpanded = false });
+        EditorChrome.EnabledBy(more, vm, nameof(vm.IsGptConfigurationEnabled));
+        var testButton = UiUtil.MakeButton(Se.Language.Video.AudioToText.GptConnectionTest, vm.TestGptConnectionCommand)
+            .BindIsEnabled(vm, nameof(vm.CanTestGptConnection));
+        testButton.Name = "GptConnectionTestButton";
+        var cancel = UiUtil.MakeButton(Se.Language.General.Cancel, vm.CancelGptConnectionTestCommand)
+            .BindIsVisible(vm, nameof(vm.IsTestingGptConnection));
+        var actions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+        actions.Children.Add(testButton);
+        actions.Children.Add(cancel);
+        var hint = new TextBlock { Text = Se.Language.Video.AudioToText.GptConnectionTestHint, TextWrapping = TextWrapping.Wrap, FontSize = 12 };
+        var result = EditorChrome.MakeBoundHint(nameof(vm.GptConnectionTestStatus), 12);
+        result.TextWrapping = TextWrapping.Wrap;
+        result.Name = "GptConnectionTestStatus";
+        return new Control[] { fields, actions, hint, result, timingHint, more };
     }
 
     private static Control[] MakeOpenRouterSttRows(SpeechToTextViewModel vm)

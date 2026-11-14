@@ -3,6 +3,7 @@ using Nikse.SubtitleEdit.Logic.Compression;
 using Nikse.SubtitleEdit.Logic.Config;
 using System;
 using System.IO;
+using System.Security.Cryptography;
 using System.Threading.Tasks;
 
 namespace Nikse.SubtitleEdit.Logic.Initializers;
@@ -15,6 +16,11 @@ public interface ILanguageInitializer
 public class LanguageInitializer(IZipUnpacker zipUnpacker) : ILanguageInitializer
 {
     private static readonly Uri LanguagesZipUri = new("avares://SubtitleEdit/Assets/Languages.zip");
+    private static readonly Lazy<string> BundleFingerprint = new(() =>
+    {
+        using var stream = AssetLoader.Open(LanguagesZipUri);
+        return Convert.ToHexString(SHA256.HashData(stream));
+    });
 
     public async Task UpdateLanguagesIfNeeded()
     {
@@ -25,6 +31,13 @@ public class LanguageInitializer(IZipUnpacker zipUnpacker) : ILanguageInitialize
             if (Unpack())
             {
                 WriteNewVersionFile();
+                // Startup may already have loaded the old cached language before extraction.
+                // Reload it so newly opened dialogs use the refreshed strings in this session.
+                if (Se.Settings.General.Language != "English")
+                {
+                    var selected = Path.Combine(Se.TranslationFolder, Se.Settings.General.Language + ".json");
+                    if (File.Exists(selected)) await Se.LoadLanguageFromFileAsync(selected);
+                }
             }
         }
     }
@@ -40,8 +53,8 @@ public class LanguageInitializer(IZipUnpacker zipUnpacker) : ILanguageInitialize
             }
 
             var versionFileName = Path.Combine(outputDir, "version.txt");
-            File.Delete(versionFileName);
             File.WriteAllText(versionFileName, Se.Version);
+            File.WriteAllText(Path.Combine(outputDir, "bundle-sha256.txt"), BundleFingerprint.Value);
         }
         catch
         {
@@ -49,9 +62,10 @@ public class LanguageInitializer(IZipUnpacker zipUnpacker) : ILanguageInitialize
         }
     }
 
-    private static async Task<bool> NeedsUpdate()
+    private static Task<bool> NeedsUpdate() => NeedsUpdate(Se.TranslationFolder, Se.Version, BundleFingerprint.Value);
+
+    internal static async Task<bool> NeedsUpdate(string outputDir, string applicationVersion, string bundleFingerprint)
     {
-        string outputDir = Se.TranslationFolder;
         if (!Directory.Exists(outputDir))
         {
             return true;
@@ -63,7 +77,7 @@ public class LanguageInitializer(IZipUnpacker zipUnpacker) : ILanguageInitialize
             return true;
         }
 
-        var currentNormalizedVersion = new SemanticVersion(Se.Version);
+        var currentNormalizedVersion = new SemanticVersion(applicationVersion);
 
         var version = await File.ReadAllTextAsync(versionFileName);
         var normalizedVersion = new SemanticVersion(version);
@@ -72,8 +86,13 @@ public class LanguageInitializer(IZipUnpacker zipUnpacker) : ILanguageInitialize
         {
             return true;
         }
+        if (currentNormalizedVersion.IsLessThan(normalizedVersion)) return false;
 
-        return false;
+        // Test builds and patched releases can share a version number while shipping new
+        // translations. A content fingerprint prevents old caches from leaving new fields in English.
+        var fingerprintFile = Path.Combine(outputDir, "bundle-sha256.txt");
+        return !File.Exists(fingerprintFile) ||
+            !string.Equals((await File.ReadAllTextAsync(fingerprintFile)).Trim(), bundleFingerprint, StringComparison.OrdinalIgnoreCase);
     }
 
     /// <returns><see langword="true"/> when every language file was written.</returns>

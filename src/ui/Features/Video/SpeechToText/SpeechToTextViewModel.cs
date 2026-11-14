@@ -70,8 +70,8 @@ public partial class SpeechToTextViewModel : ObservableObject
     [ObservableProperty] private bool _isSingleModeVisible;
     [ObservableProperty] private bool _isWhisperCppActive;
     [ObservableProperty] private bool _isWhisperPurfviewXxlActive;
-    [ObservableProperty, NotifyPropertyChangedFor(nameof(CanEditBatch))] private bool _isTranscribeEnabled;
-    [ObservableProperty, NotifyPropertyChangedFor(nameof(CanEditBatch))] private bool _isAddingFiles;
+    [ObservableProperty, NotifyPropertyChangedFor(nameof(CanEditBatch)), NotifyPropertyChangedFor(nameof(CanTestGptConnection)), NotifyPropertyChangedFor(nameof(IsGptConfigurationEnabled))] private bool _isTranscribeEnabled;
+    [ObservableProperty, NotifyPropertyChangedFor(nameof(CanEditBatch)), NotifyPropertyChangedFor(nameof(CanTestGptConnection))] private bool _isAddingFiles;
     [ObservableProperty] private bool _includeSubfolders;
     [ObservableProperty] private bool _skipEmbeddedSubtitles;
     [ObservableProperty] private bool _skipExternalSubtitles;
@@ -80,7 +80,7 @@ public partial class SpeechToTextViewModel : ObservableObject
     public string BatchSkippedText => SkippedBatchCount == 0 ? string.Empty
         : string.Format(Se.Language.Video.AudioToText.SkippedFilesX, SkippedBatchCount);
     [ObservableProperty] private string _addingFilesStatus = string.Empty;
-    public bool CanEditBatch => IsTranscribeEnabled && !IsAddingFiles;
+    public bool CanEditBatch => IsTranscribeEnabled && !IsAddingFiles && !IsTestingGptConnection;
     [ObservableProperty] private bool _isTranslateVisible;
     [ObservableProperty] private bool _isBackendSelectionVisible;
     [ObservableProperty] private bool _isModelSelectionVisible;
@@ -115,7 +115,7 @@ public partial class SpeechToTextViewModel : ObservableObject
     [ObservableProperty] private string _engineDownloadHint;
 
     [ObservableProperty] private bool _isOpenAiCompatibleSttVisible;
-    [ObservableProperty] private bool _isGptTranscribeVisible;
+    [ObservableProperty, NotifyPropertyChangedFor(nameof(CanTestGptConnection))] private bool _isGptTranscribeVisible;
     [ObservableProperty] private string _gptTranscribeUrl = string.Empty;
     [ObservableProperty] private string _gptTranscribeApiKey = string.Empty;
     [ObservableProperty, NotifyPropertyChangedFor(nameof(GptTimingHint)), NotifyPropertyChangedFor(nameof(GptPromptAvailable))]
@@ -4662,6 +4662,11 @@ public partial class SpeechToTextViewModel : ObservableObject
     [RelayCommand]
     private void Cancel()
     {
+        if (IsTestingGptConnection)
+        {
+            _gptConnectionTestCts?.Cancel();
+            return;
+        }
         if (IsAddingFiles)
         {
             _addFilesCts?.Cancel();
@@ -6528,6 +6533,7 @@ public partial class SpeechToTextViewModel : ObservableObject
         // The speech isolation runs on its own task, not on one of the timers: _abort is what
         // makes it kill its process and stop before it would start the engine on a closed window.
         _windowClosing = true;
+        _gptConnectionTestCts?.Cancel();
         _addFilesCts?.Cancel();
         _abort = true;
 
